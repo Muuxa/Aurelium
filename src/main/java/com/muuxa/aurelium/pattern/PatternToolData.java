@@ -24,9 +24,10 @@ import java.util.zip.GZIPOutputStream;
  * The pattern stash of a pattern tool, kept <b>in the item's own NBT</b>
  * (inside the vanilla {@code minecraft:custom_data} component), <b>gzip-compressed</b>.
  *
- * <p>Deliberately no UUID indirection: the stored stacks — with every component intact — travel
- * with the item, so a tool can be put in a chest, traded, or carried across dimensions without
- * any world-side bookkeeping.</p>
+ * <p>No world-side storage is used: the stored stacks — with every component intact — travel with
+ * the item, so a tool can be put in a chest, traded, or carried across dimensions. A short-lived
+ * operation marker is kept beside the payload only while a cut/paste job is running, which lets the
+ * job find the same tool after it is moved or dropped.</p>
  *
  * <p><b>Why compression is mandatory, not a nicety:</b> an item's NBT is shipped to the client
  * inside packets (e.g. {@code container_set_slot}) and the client refuses any single NBT that
@@ -62,6 +63,10 @@ public final class PatternToolData {
      * when {@code false} (the default) patterns with a matching primary output are simply skipped.
      */
     private static final String KEY_REPLACE = "aurelium_pattern_replace";
+    /** Cached count of unusable entries, refreshed by a paste (see {@link #invalidCount}). */
+    private static final String KEY_INVALID = "aurelium_patterns_invalid";
+    /** Temporary per-job marker; cleared when the cut/paste operation ends. */
+    private static final String KEY_OPERATION = "aurelium_pattern_job";
 
     /**
      * Safety budget for the compressed payload. The client's per-NBT ceiling is 2 MiB; being
@@ -85,6 +90,53 @@ public final class PatternToolData {
         return out;
     }
 
+    /**
+     * How many stored entries were found unusable the last time a paste examined them.
+     *
+     * <p>Read from a plain {@code int} component, <b>not</b> by inspecting the payload: the compiler
+     * runs this on every tooltip render, and inflating a multi-megabyte gzip payload there would
+     * reintroduce exactly the stutter the paste rework removed. The value is written back whenever
+     * a paste finishes its validity pass, so it stays accurate for anything the player actually
+     * interacts with, and is simply absent (0) until then.</p>
+     */
+    public static int invalidCount(ItemStack tool) {
+        CompoundTag tag = tagOf(tool);
+        return tag.contains(KEY_INVALID, Tag.TAG_INT) ? tag.getInt(KEY_INVALID) : 0;
+    }
+
+    /** Records the invalid-entry count discovered by a paste, for display in the tooltip. */
+    public static void setInvalidCount(ItemStack tool, int invalid) {
+        CompoundTag tag = tagOf(tool);
+        if (invalid <= 0) {
+            tag.remove(KEY_INVALID);
+        } else {
+            tag.putInt(KEY_INVALID, invalid);
+        }
+        applyTag(tool, tag);
+    }
+
+    /** Marks the tool as belonging to one running cut/paste operation. */
+    public static void setOperation(ItemStack tool, String operation) {
+        CompoundTag tag = tagOf(tool);
+        if (operation == null || operation.isBlank()) {
+            tag.remove(KEY_OPERATION);
+        } else {
+            tag.putString(KEY_OPERATION, operation);
+        }
+        applyTag(tool, tag);
+    }
+
+    /** The operation marker, or {@code null} when this tool is not part of a running job. */
+    public static String operation(ItemStack tool) {
+        CompoundTag tag = tagOf(tool);
+        return tag.contains(KEY_OPERATION, Tag.TAG_STRING) ? tag.getString(KEY_OPERATION) : null;
+    }
+
+    /** Clears the marker only when it still belongs to the expected operation. */
+    public static void clearOperation(ItemStack tool, String operation) {
+        if (operation == null || !operation.equals(operation(tool))) return;
+        setOperation(tool, null);
+    }
     /**
      * Stored pattern count without decompressing (client-safe, no registry access). Falls back to
      * inflating legacy payloads that predate {@link #KEY_COUNT}.
@@ -277,6 +329,7 @@ public final class PatternToolData {
      * @return true when the payload was stored (or cleared)
      */
     public static boolean saveTags(ItemStack tool, ListTag tags) {
+        setInvalidCount(tool, 0); // the payload is being replaced wholesale: the old count is stale
         if (tags == null || tags.isEmpty()) {
             CompoundTag tag = tagOf(tool);
             tag.remove(KEY);
@@ -301,6 +354,7 @@ public final class PatternToolData {
      */
     public static int appendToStored(ItemStack tool, List<ItemStack> additions,
                                      HolderLookup.Provider registries) {
+        setInvalidCount(tool, 0); // additions change the payload; recount on the next paste
         ListTag existing = storedTags(tool);
         ListTag added = encode(additions, registries);
         if (added.isEmpty()) return 0;
@@ -346,6 +400,79 @@ public final class PatternToolData {
         return bestCount - floor;
     }
 
+    /**
+     * Plans the combined payload ({@code existing} + {@code additions}) without writing to the
+     * item, so the serialise-and-compress half can run on a worker thread.
+     *
+     * <p>{@link Prepared#count()} is the TOTAL entry count after the append; the caller derives how
+     * many additions were accepted by subtracting the previously stored size. {@code compressed()}
+     * is {@code null} only when even the already-stored entries cannot be re-encoded, which the
+     * caller reports as "nothing changed".</p>
+     */
+    public static Prepared prepareAppend(ListTag existing, List<ItemStack> additions,
+                                         HolderLookup.Provider registries) {
+        ListTag added = encode(additions, registries);
+        if (added.isEmpty()) return new Prepared(existing.size(), null);
+        ListTag combined = new ListTag();
+        for (int i = 0; i < existing.size(); i++) combined.add(existing.get(i));
+        for (int i = 0; i < added.size(); i++) combined.add(added.get(i));
+
+        byte[] full = compress(combined);
+        if (full != null && full.length <= MAX_COMPRESSED_BYTES) {
+            return new Prepared(combined.size(), full);
+        }
+        // Oversized: keep the longest prefix that fits, never below what was already stored.
+        int floor = existing.size();
+        int lo = floor;
+        int hi = combined.size();
+        byte[] bestBytes = null;
+        int bestCount = -1;
+        while (lo < hi) {
+            int mid = (lo + hi + 1) >>> 1;
+            byte[] probe = compress(firstN(combined, mid));
+            if (probe != null && probe.length <= MAX_COMPRESSED_BYTES) {
+                lo = mid;
+                if (mid > bestCount) {
+                    bestBytes = probe;
+                    bestCount = mid;
+                }
+            } else {
+                hi = mid - 1;
+            }
+        }
+        if (bestCount < floor) {
+            byte[] baseline = compress(firstN(combined, floor));
+            if (baseline == null || baseline.length > MAX_COMPRESSED_BYTES) {
+                return new Prepared(floor, null);
+            }
+            return new Prepared(floor, baseline);
+        }
+        return new Prepared(bestCount, bestBytes);
+    }
+
+    /** Compresses a tag list without touching any item (the tail of a paste). */
+    public static byte[] compressOnly(ListTag tags) {
+        if (tags == null || tags.isEmpty()) return new byte[0];
+        byte[] compressed = compress(tags);
+        if (compressed == null || compressed.length > MAX_COMPRESSED_BYTES) return null;
+        return compressed;
+    }
+
+    /** Writes a pre-compressed payload produced by {@link #compressOnly}. */
+    public static boolean writeCompressed(ItemStack tool, int count, byte[] compressed) {
+        if (compressed == null) return false;
+        if (compressed.length == 0) {
+            CompoundTag tag = tagOf(tool);
+            tag.remove(KEY);
+            tag.remove(KEY_COMPRESSED);
+            tag.remove(KEY_COUNT);
+            applyTag(tool, tag);
+            return true;
+        }
+        if (compressed.length > MAX_COMPRESSED_BYTES) return false;
+        writePayload(tool, count, compressed);
+        return true;
+    }
     /** The first {@code n} entries as a new list (entries shared, not copied). */
     private static ListTag firstN(ListTag source, int n) {
         if (n >= source.size()) return source;

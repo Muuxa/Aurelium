@@ -39,7 +39,10 @@ import java.util.regex.Pattern;
  * {@link VaultWorldData} must only be touched there.</p>
  */
 public final class VaultExporter {
-    private static final DateTimeFormatter STAMP = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss");
+    /** Timestamp used inside generated files (server local time, second precision). */
+    private static final DateTimeFormatter TIME_STAMP = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+    /** Compact timestamp used in fallback file names. */
+    private static final DateTimeFormatter FILE_STAMP = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss");
     private static final Pattern SAFE_NAME = Pattern.compile("[^a-zA-Z0-9_.-]");
     private static final String EXPORT_SUBDIR = "export";
 
@@ -185,7 +188,7 @@ public final class VaultExporter {
         StringBuilder sb = new StringBuilder();
         sb.append("// 由 AURELIUM /aurelium export 生成 —— 样板工具注册（仅注册，无配方）\n");
         sb.append("// 名字：").append(name).append('\n');
-        sb.append("// 导出时间: ").append(LocalDateTime.now()).append('\n');
+        sb.append("// 导出时间: ").append(LocalDateTime.now().format(TIME_STAMP)).append('\n');
         sb.append("//\n");
         sb.append("// 注：MC 的物品 id 只允许小写字母/数字/_.-，中文无法进 id；因此物品 id 由\n");
         sb.append("//     名字推导，而游戏内显示的名称就是上面这行名字。\n");
@@ -193,12 +196,11 @@ public final class VaultExporter {
         sb.append('\n');
         sb.append("StartupEvents.registry('item', event => {\n");
         sb.append("  event.create('aurelium:").append(singleToolId(name))
-                .append("', 'aurelium:pattern_tool')\n");
-        sb.append("       .displayName(\"").append(escapeForKubeJs(name)).append("\")\n");
-        sb.append("       .copyTool(").append(copyTool).append(")\n");
-        sb.append("       .toolPayload(\"").append(escapeForKubeJs(base64 == null ? "" : base64))
-                .append("\")\n");
-        sb.append("       .replaceMode(").append(replace).append(");\n");
+                .append("','aurelium:pattern_tool')")
+                .append(".displayName(\"").append(escapeForKubeJs(name)).append("\")")
+                .append(".copyTool(").append(copyTool).append(")")
+                .append(".toolPayload(\"").append(escapeForKubeJs(base64 == null ? "" : base64)).append("\")")
+                .append(".replaceMode(").append(replace).append(");\n");
         sb.append("});\n");
         return sb.toString();
     }
@@ -319,7 +321,7 @@ public final class VaultExporter {
     private static String renderToolScript(List<Row> tools, String nameHint) {
         StringBuilder sb = new StringBuilder();
         sb.append("// 由 AURELIUM /aurelium export 生成 —— 样板工具注册（仅注册，无配方）\n");
-        sb.append("// 导出时间: ").append(LocalDateTime.now()).append('\n');
+        sb.append("// 导出时间: ").append(LocalDateTime.now().format(TIME_STAMP)).append('\n');
         sb.append("// 每个工具保留：完整样板内容、替换模式、以及它自己的名字。\n");
         sb.append("//\n");
         sb.append("// 注：MC 的物品 id 只允许小写字母/数字/_.-，中文无法进 id；因此这里\n");
@@ -332,13 +334,11 @@ public final class VaultExporter {
             String name = toolDisplayName(row);
             String id = uniqueToolId(name, usedIds);
             sb.append("  // 名字：").append(name).append('\n');
-            sb.append("  event.create('aurelium:").append(id)
-                    .append("', 'aurelium:pattern_tool')\n");
-            sb.append("       .displayName(\"").append(escapeForKubeJs(name)).append("\")\n");
-            sb.append("       .copyTool(").append(toolIsCopy(row)).append(")\n");
-            sb.append("       .toolPayload(\"").append(escapeForKubeJs(row.toolPayload))
-                    .append("\")\n");
-            sb.append("       .replaceMode(").append(row.toolReplace).append(");\n");
+            sb.append("  event.create('aurelium:").append(id).append("','aurelium:pattern_tool')")
+                    .append(".displayName(\"").append(escapeForKubeJs(name)).append("\")")
+                    .append(".copyTool(").append(toolIsCopy(row)).append(")")
+                    .append(".toolPayload(\"").append(escapeForKubeJs(row.toolPayload)).append("\")")
+                    .append(".replaceMode(").append(row.toolReplace).append(");\n");
         }
         sb.append("});\n");
         return sb.toString();
@@ -385,18 +385,10 @@ public final class VaultExporter {
         sb.append("//     D D D\n");
         sb.append('\n');
         sb.append("ServerEvents.recipes(event => {\n");
-        sb.append("  event.shaped(\n");
-        sb.append("    Item.of('").append(itemId).append("'),\n");
-        sb.append("    [\n");
-        sb.append("      'DDD',\n");
-        sb.append("      'DCD',\n");
-        sb.append("      'DDD'\n");
-        sb.append("    ],\n");
-        sb.append("    {\n");
-        sb.append("      D: 'minecraft:dirt',\n");
-        sb.append("      C: 'minecraft:cobblestone'\n");
-        sb.append("    }\n");
-        sb.append("  )\n");
+        sb.append("  event.shaped(Item.of('").append(itemId).append("'), ['DDD', 'DCD', 'DDD'], {\n");
+        sb.append("    D: 'minecraft:dirt',\n");
+        sb.append("    C: 'minecraft:cobblestone'\n");
+        sb.append("  })\n");
         sb.append("})\n");
         return sb.toString();
     }
@@ -409,7 +401,7 @@ public final class VaultExporter {
         sb.append("AURELIUM 宝匣分析\n");
         sb.append("=================\n");
         sb.append("uuid      : ").append(id).append('\n');
-        sb.append("导出时间  : ").append(LocalDateTime.now()).append('\n');
+        sb.append("导出时间  : ").append(LocalDateTime.now().format(TIME_STAMP)).append('\n');
         sb.append("宝匣名字  : ").append(meta.displayName() == null ? "(默认名)" : meta.displayName()).append('\n');
         sb.append("宝匣电量  : ").append(formatPower(meta.power())).append(" AE\n");
         sb.append("套娃层数  : ").append(maxDepth).append("（L0 = 本宝匣）\n");
@@ -509,7 +501,7 @@ public final class VaultExporter {
     }
 
     private static String buildBaseName(UUID id, String nameHint) {
-        String stamp = LocalDateTime.now().format(STAMP);
+        String stamp = LocalDateTime.now().format(FILE_STAMP);
         String id8 = id.toString().substring(0, 8);
         if (nameHint != null && !nameHint.isBlank()) {
             String cleaned = SAFE_NAME.matcher(nameHint.trim()).replaceAll("_");
@@ -521,17 +513,18 @@ public final class VaultExporter {
     private static String renderKubeJs(UUID id, List<Row> rows, int maxDepth, String name,
                                        VaultMeta meta, boolean replaceToolPatterns) {
         // Item/pack ids: root = "export_<name>" (no number); children = "export_<name>_<n>".
-        String rootItem = "export_" + name;
+        String rootItem = itemNameFor("", name);
         String rootDisplay = meta.displayName() != null ? meta.displayName() : ("导出的宝匣 " + name);
         StringBuilder sb = new StringBuilder();
         sb.append("// 由 AURELIUM /aurelium export 生成\n");
         sb.append("// vault uuid: ").append(id).append('\n');
-        sb.append("// 导出时间: ").append(LocalDateTime.now()).append('\n');
+        sb.append("// 导出时间: ").append(LocalDateTime.now().format(TIME_STAMP)).append('\n');
         sb.append("// 套娃层数: ").append(maxDepth).append('\n');
         sb.append("// 样板工具替换模式: ").append(replaceToolPatterns ? "true（粘贴时替换相同主产物）" : "false（相同主产物不粘贴）").append('\n');
         sb.append("// 本脚本注册一个专用宝匣物品（独立 id）及其内容包（含套娃）。\n");
-        sb.append("// 物品 id: ").append(rootItem).append("（子包物品为 ").append(rootItem).append("_1、_2 …）\n");
-        sb.append("// 取得物品：Item.of('").append(rootItem).append("')\n");
+        sb.append("// 物品 id: kubejs:").append(rootItem).append("（子包为 kubejs:").append(rootItem).append("_1、_2 …）\n");
+        sb.append("// 内容包 id: aurelium:").append(rootItem).append("（带命名空间，与模组自带内容包区分）\n");
+        sb.append("// 取得物品：Item.of('kubejs:").append(rootItem).append("')\n");
         sb.append("// 名字/电量已按导出时的真实值写入；内层宝匣沿用同一电量。\n");
         sb.append("// 直接放进 kubejs/startup_scripts/ 即可。\n");
         sb.append('\n');
@@ -544,10 +537,10 @@ public final class VaultExporter {
             // Each level keeps its OWN name: the root uses the held vault's name, a nested vault
             // uses the name its item carried (falling back to the root name plus the path).
             String display = path.isEmpty() ? rootDisplay : vaultNameFor(path, rows, rootDisplay);
-            sb.append("  event.create('").append(itemName).append("', 'aurelium:star_vault')\n");
-            sb.append("       .vaultPack(\"").append(packId).append("\")\n");
-            sb.append("       .vaultPower(").append(formatPower(meta.power())).append(")\n");
-            sb.append("       .displayName(\"").append(escapeForKubeJs(display)).append("\");\n");
+            sb.append("  event.create('").append(itemName).append("','aurelium:star_vault')")
+                    .append(".vaultPack('").append(packId).append("')")
+                    .append(".vaultPower(").append(formatPower(meta.power())).append(")")
+                    .append(".displayName(\"").append(escapeForKubeJs(display)).append("\");\n");
         }
         sb.append("});\n");
         sb.append('\n');
@@ -556,6 +549,7 @@ public final class VaultExporter {
             emitPack(sb, path, rows, name, meta, rootDisplay);
         }
         sb.append('\n');
+        sb.append("})\n");
         // A pattern tool's replace flag lives in its own item NBT, and the export writes that NBT
         // verbatim into the item token — so the exported tool carries its paste mode with it, no
         // extra script statement needed (see stampToolReplace below).
@@ -604,38 +598,30 @@ public final class VaultExporter {
     private static void emitPack(StringBuilder sb, String path, List<Row> rows, String name,
                                  VaultMeta meta, String rootDisplay) {
         sb.append("AureliumPacks.register({\n");
-        sb.append("  id:   \"").append(packIdFor(path, name)).append("\",\n");
+        sb.append("  id: \"").append(packIdFor(path, name)).append("\",\n");
         // The pack carries its vault's own name and charge: a nested vault referenced as
-        // { packId: ... } has no other place to store them, so without this the child vault
-        // came back with the generic name and a flat 10000 AE.
+        // {packId:"..."} has no other place to store them, so without this the child vault came
+        // back with the generic name and a flat 10000 AE.
         String packName = path.isEmpty() ? rootDisplay : vaultNameFor(path, rows, rootDisplay);
         sb.append("  name: \"").append(escapeForKubeJs(packName)).append("\",\n");
         sb.append("  power: ").append(formatPower(meta.power())).append(",\n");
         sb.append("  items: [\n");
         for (Row row : rows) {
             if (!path.equals(row.ownPath)) continue;
-            if (row.tool) {
-                // A pattern tool stored in the vault is part of its contents and must survive the
-                // round-trip. Its full payload is already Base64-encoded inside the token, so the
-                // real item token restores the tool exactly. (Writing only a comment here used to
-                // drop the tool and produced an invalid empty pack when a sub-vault held only
-                // tools.) The companion .tools.js still registers a standalone named item.
-                sb.append("    { itemId: \"").append(escapeForKubeJs(row.token)).append("\", count: ")
-                        .append(row.amount).append(" },\n");
-                continue;
-            }
             if (row.vault) {
                 // A nested vault: reference its own pack, carrying the stack count.
                 String childId = row.childPath == null ? null : packIdFor(row.childPath, name);
                 if (childId == null) {
-                    sb.append("    // ⚠ 未能解析嵌套宝匣的子包（原物品缺少 UUID），已跳过\n");
+                    sb.append("    // 未能解析嵌套宝匣的子包（原物品缺少 UUID），已跳过\n");
                     continue;
                 }
-                sb.append("    { packId: \"").append(childId).append("\", count: ")
-                        .append(row.amount).append(" },\n");
+                sb.append("    {packId:\"").append(childId).append("\",count:")
+                        .append(row.amount).append("},\n");
             } else {
-                sb.append("    { itemId: \"").append(escapeForKubeJs(row.token)).append("\", count: ")
-                        .append(row.amount).append(" },\n");
+                // Items and pattern tools alike: the token already carries everything the entry
+                // needs (a tool's payload is Base64-encoded inside it), so one compact line each.
+                sb.append("    {itemId:\"").append(escapeForKubeJs(row.token)).append("\",count:")
+                        .append(row.amount).append("},\n");
             }
         }
         sb.append("  ]\n");

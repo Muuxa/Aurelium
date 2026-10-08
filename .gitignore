@@ -32,6 +32,9 @@ tmp/
 *.bak
 *.log
 
+# ---- Local documentation / handoff notes (kept out of the repo) ----
+docs/
+
 # ---- Optional: keep the third-party compileOnly jars out of the repo.
 #      They are only needed to build; delete this block's '#' to exclude them.
 # libs/*.jar

@@ -506,6 +506,19 @@ public final class PatternContainerAccess {
      * clear is left alone and reported as "not removed".</p>
      */
     public static ItemStack removePrimaryOutput(InternalInventory inv, AEKey output, Level level) {
+        RemoveResult result = removePrimaryOutputSlot(inv, output, level);
+        return result == null ? null : result.removed();
+    }
+
+    /**
+     * The removed stack together with the slot it came from, so a paste running in replace mode can
+     * reuse the freshly emptied slot instead of only the ones its scan saw.
+     */
+    public record RemoveResult(ItemStack removed, int slot) {
+    }
+
+    /** As {@link #removePrimaryOutput}, but also reports which slot was vacated. */
+    public static RemoveResult removePrimaryOutputSlot(InternalInventory inv, AEKey output, Level level) {
         if (inv == null || level == null || output == null) return null;
         Object quiet = beginQuiet(inv);
         try {
@@ -515,7 +528,7 @@ public final class PatternContainerAccess {
                 if (stack == null || stack.isEmpty()) continue;
                 if (!output.equals(PatternOutputs.primaryOutput(stack, level))) continue;
                 inv.setItemDirect(slot, ItemStack.EMPTY);
-                if (inv.getStackInSlot(slot).isEmpty()) return stack.copy();
+                if (inv.getStackInSlot(slot).isEmpty()) return new RemoveResult(stack.copy(), slot);
                 return null; // refused: treat as "could not replace"
             }
         } finally {
@@ -550,8 +563,23 @@ public final class PatternContainerAccess {
         return null;
     }
 
+    /**
+     * True when a stored stack is something the tools may move: an encoded AE2 pattern (item or
+     * processing) or the omniversal pattern. Blank/foreign/malformed entries are not patterns and
+     * are reported as invalid rather than being pasted (a queued invalid entry is refused by every
+     * slot, which used to make an empty container answer "target is full").
+     */
+    public static boolean isUsablePattern(ItemStack stack, Level level) {
+        if (stack == null || stack.isEmpty()) return false;
+        if (isOmniversalPattern(stack)) return true;
+                try {
+            return appeng.api.crafting.PatternDetailsHelper.decodePattern(stack, level) != null;
+        } catch (Throwable undecodable) {
+            return false;
+        }
+    }
     /** Matches the omniversal pattern item by registry id (the class is mod-local). */
-    private static boolean isOmniversalPattern(ItemStack stack) {
+    static boolean isOmniversalPattern(ItemStack stack) {
         if (stack == null || stack.isEmpty()) return false;
         var id = net.minecraft.core.registries.BuiltInRegistries.ITEM.getKey(stack.getItem());
         return id != null && id.toString().equals("useless_mod:omniversal_pattern");
@@ -839,6 +867,594 @@ public final class PatternContainerAccess {
         }).orElse(null);
     }
 
+    // --- Useless Mod change batching ---------------------------------------------------------
+    //
+    // The Useless Mod external-inventory containers (the omniversal pattern assembly and its
+    // siblings) keep their slots in world saved data and re-serialise the WHOLE container from
+    // onContentsChanged. A bulk write therefore cost one full NBT dump per slot: a spark profile of
+    // a paste on a 4096-slot assembly measured ~9 ms inside every setItemDirect, all of it under
+    // ExternalInventoryStore.save -> saveFrom. Writing a few hundred slots meant seconds of freeze.
+    //
+    // The handler guards that callback with a plain depth counter (onContentsChanged returns early
+    // while the depth is positive, remembering that one notification is owed). We raise that counter
+    // for the duration of a bulk walk and lower it afterwards, so the container still notifies — and
+    // saves — exactly once per batch instead of once per slot.
+    //
+    // Reflection, not a hard reference: Useless Mod is an optional runtime dependency and its
+    // classes are absent from the dev classpath. Anything unexpected (absent mod, renamed field,
+    // blocked reflection) silently degrades to the previous unbatched behaviour.
+
+    /** The Useless Mod handler class that owns the depth counter. */
+    private static final String USELESS_HANDLER =
+            "com.sorrowmist.useless.content.blockentities.RecoverableItemStackHandler";
+
+    /** Reports the batching state once per JVM, so a silent fallback cannot go unnoticed. */
+    private static final java.util.concurrent.atomic.AtomicBoolean BATCH_REPORTED =
+            new java.util.concurrent.atomic.AtomicBoolean();
+
+    /** One open change-batch scope. */
+    private interface ChangeBatch {
+        /** Lowers the depth counter, firing the container's single deferred change if owed. */
+        void release();
+
+        /**
+         * Raises the handler's change-batch depth, or returns {@code null} when the container is not
+         * a Useless Mod external inventory (or the field is not reachable).
+         */
+        static ChangeBatch open(InternalInventory inv) {
+            if (inv == null) return null;
+            try {
+                Class<?> handlerClass = Class.forName(USELESS_HANDLER);
+                Object handler = findHandler(inv, handlerClass, 0);
+                if (handler == null) return null;
+                BatchScope scope = new BatchScope(handler);
+                if (!scope.enter()) {
+                    warnUnbatched("changeBatchDepth 不可达");
+                    return null;
+                }
+                if (BATCH_REPORTED.compareAndSet(false, true)) {
+                    LOGGER.info("AURELIUM：已启用无用之物外部库存的批量写入（整个批次只保存一次容器）。");
+                }
+                return scope;
+            } catch (ClassNotFoundException absent) {
+                return null; // Useless Mod is not installed: nothing to batch
+            } catch (Throwable unsupported) {
+                warnUnbatched(unsupported.toString());
+                return null;
+            }
+        }
+    }
+
+    /** Direct manipulation of the handler's depth counter (see the section comment for why). */
+    private static final class BatchScope implements ChangeBatch {
+        private final Object handler;
+        private boolean entered;
+
+        BatchScope(Object handler) {
+            this.handler = handler;
+        }
+
+        /** Raises the depth by one; false when the field is not reachable. */
+        boolean enter() {
+            Field field = cachedField(handler.getClass(), "changeBatchDepth");
+            if (field == null) return false;
+            try {
+                // A bulk walk runs on the server thread only, so a plain read/write is enough; the
+                // counter is what the handler itself checks on every change.
+                field.setInt(handler, field.getInt(handler) + 1);
+                entered = true;
+                return true;
+            } catch (Throwable unreachable) {
+                return false;
+            }
+        }
+
+        @Override
+        public void release() {
+            if (!entered) return;
+            entered = false;
+            Field field = cachedField(handler.getClass(), "changeBatchDepth");
+            if (field == null) return;
+            try {
+                int depth = Math.max(0, field.getInt(handler) - 1);
+                field.setInt(handler, depth);
+                if (depth > 0) return;
+                // Depth is back to zero: if a change was deferred, fire the handler's own listener,
+                // which is exactly what withChangeBatch would have done on exit.
+                Field pending = cachedField(handler.getClass(), "changePending");
+                Field listener = cachedField(handler.getClass(), "changeListener");
+                if (pending == null || listener == null || !pending.getBoolean(handler)) return;
+                pending.setBoolean(handler, false);
+                Object runnable = listener.get(handler);
+                if (runnable instanceof Runnable r) r.run();
+            } catch (Throwable ignored) {
+                // best-effort: the container simply keeps its last saved state until the next change
+            }
+        }
+    }
+
+    /** One-shot diagnostic: batching was expected but could not be enabled. */
+    private static void warnUnbatched(String why) {
+        if (BATCH_REPORTED.compareAndSet(false, true)) {
+            LOGGER.warn("AURELIUM：检测到无用之物的外部库存，但未能启用批量写入（{}）。"
+                    + "批量剪切/粘贴会退化为逐槽保存，可能明显卡顿。", why);
+        }
+    }
+
+    /**
+     * Finds the Useless Mod handler behind an inventory.
+     *
+     * <p>Deliberately <b>not</b> driven by a list of remembered field names: AE2 wraps these
+     * inventories differently per add-on (combined views, filtered views, item-handler adapters),
+     * and the pattern assembly even hands back an anonymous subclass of the handler. Instead the
+     * object graph is walked and every non-static field whose type could hold an inventory is
+     * followed, which stays correct when a wrapper is renamed or swapped.</p>
+     */
+    private static Object findHandler(Object node, Class<?> handlerClass, int depth) {
+        if (node == null || depth > 4) return null;
+        if (handlerClass.isInstance(node)) return node;
+        if (node instanceof CompositeInventory composite) {
+            for (InternalInventory part : composite.parts()) {
+                Object found = findHandler(part, handlerClass, depth + 1);
+                if (found != null) return found;
+            }
+            return null;
+        }
+        if (node instanceof InternalInventory[] array) {
+            for (InternalInventory part : array) {
+                Object found = findHandler(part, handlerClass, depth + 1);
+                if (found != null) return found;
+            }
+            return null;
+        }
+        if (node instanceof Iterable<?> iterable && !(node instanceof InternalInventory)) {
+            for (Object element : iterable) {
+                Object found = findHandler(element, handlerClass, depth + 1);
+                if (found != null) return found;
+            }
+            return null;
+        }
+        // Follow the object's own fields. Only values that actually look like an inventory are
+        // descended into, so this cannot wander into arbitrary world state.
+        for (Class<?> type = node.getClass(); type != null && type != Object.class;
+             type = type.getSuperclass()) {
+            for (Field f : type.getDeclaredFields()) {
+                if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+                if (!INVENTORY_LIKE.isAssignableFrom(f.getType())
+                        && !InternalInventory.class.isAssignableFrom(f.getType())
+                        && !f.getType().isArray()) {
+                    continue;
+                }
+                try {
+                    f.setAccessible(true);
+                    Object value = f.get(node);
+                    Object found = findHandler(value, handlerClass, depth + 1);
+                    if (found != null) return found;
+                } catch (Throwable ignored) {
+                    // best-effort: an unreadable field simply is not followed
+                }
+            }
+        }
+        return null;
+    }
+
+    /** Field types that may hold a wrapped inventory (NeoForge's item-handler contract). */
+    private static final Class<?> INVENTORY_LIKE;
+
+    static {
+        Class<?> handlerType;
+        try {
+            handlerType = Class.forName("net.neoforged.neoforge.items.IItemHandler");
+        } catch (Throwable absent) {
+            handlerType = Object.class;
+        }
+        INVENTORY_LIKE = handlerType;
+    }
+    // --- resumable (tick-sliced) bulk walks ------------------------------------------------
+    //
+    // A held container can expose thousands of slots (the omniversal pattern assembly glues every
+    // core of its multiblock into one view). The one-shot walks further up are fine for a few dozen
+    // slots but stall the server tick on that scale, which is what made cut/paste "freeze".
+    //
+    // These sessions run the same logic with a per-call slot budget, so a caller can spread one
+    // walk over many ticks and show progress in between.
+
+    /**
+     * A resumable walk over one inventory. The AE2 re-entrancy flag is raised for the whole
+     * session and released by {@link #close()} — callers must always close, including when the job
+     * aborts (a player logging out mid-walk would otherwise leave the flag stuck on).
+     */
+    public abstract static class BulkSession implements AutoCloseable {
+        final InternalInventory inv;
+        private final Object quiet;
+        /**
+         * The Useless Mod change-batch scope, when the container is one of its external-inventory
+         * machines. Without it, every single slot write fires the host's {@code onContentsChanged},
+         * which re-serialises the whole container into world-saved data — measured at roughly 9 ms
+         * per write on a 4096-slot pattern assembly, i.e. seconds of freeze for one paste.
+         */
+        private final ChangeBatch uselessBatch;
+        private int cursor;
+        private boolean closed;
+
+        BulkSession(InternalInventory inv) {
+            this.inv = inv;
+            this.quiet = beginQuiet(inv);
+            this.uselessBatch = ChangeBatch.open(inv);
+        }
+
+        /** Total slots in the wrapped inventory (the denominator for progress display). */
+        public int size() {
+            return inv.size();
+        }
+
+        /** Slots already visited. */
+        public int cursor() {
+            return cursor;
+        }
+
+        /** True when the underlying quiet flag has been released. */
+        public synchronized boolean isClosed() {
+            return closed;
+        }
+
+        /** True when this container's per-slot save is being collapsed into one. */
+        public boolean batched() {
+            return uselessBatch != null;
+        }
+
+        /**
+         * Processes up to {@code budget} more slots. Returns {@code true} when the whole inventory
+         * has been visited.
+         */
+        public boolean step(int minSlots, long deadline) {
+            int size = inv.size();
+            int floor = Math.max(1, minSlots);
+            int done = 0;
+            while (cursor < size && (done < floor || System.nanoTime() < deadline)) {
+                visit(cursor);
+                cursor++;
+                done++;
+            }
+            return cursor >= size;
+        }
+
+        /** Called for each visited slot. */
+        abstract void visit(int slot);
+
+        @Override
+        public synchronized void close() {
+            if (closed) return;
+            closed = true;
+            // Close the Useless batch first: it fires its one deferred change notification (and thus
+            // the single save) while AE2's re-entrancy flag is still raised, so the refresh that
+            // follows does not re-trigger a per-slot notification storm.
+            if (uselessBatch != null) uselessBatch.release();
+            endQuiet(inv, quiet);
+        }
+    }
+
+    /** Resumable {@link #cut}: clears accepted slots and records what was actually taken. */
+    public static final class CutSession extends BulkSession {
+        private final int limit;
+        private final java.util.function.Predicate<ItemStack> allowlist;
+        private final List<ItemStack> taken = new ArrayList<>();
+
+        public CutSession(InternalInventory inv, int limit,
+                          java.util.function.Predicate<ItemStack> allowlist) {
+            super(inv);
+            this.limit = limit;
+            this.allowlist = allowlist;
+        }
+
+        /** Everything successfully removed so far. */
+        public List<ItemStack> taken() {
+            return taken;
+        }
+
+        @Override
+        void visit(int slot) {
+            if (taken.size() >= limit) return;
+            ItemStack stack = inv.getStackInSlot(slot);
+            if (stack == null || stack.isEmpty()) return;
+            if (allowlist != null && !allowlist.test(stack)) return;
+            inv.setItemDirect(slot, ItemStack.EMPTY);
+            // Verified against the live view: a slot that refuses the write is never reported as
+            // taken (see the one-shot cut for the reasoning).
+            if (inv.getStackInSlot(slot).isEmpty()) taken.add(stack.copy());
+        }
+
+        public boolean limitReached() {
+            return taken.size() >= limit;
+        }
+    }
+
+    /** Resumable {@link #collect}: reads accepted slots, leaving the source untouched. */
+    public static final class CollectSession extends BulkSession {
+        private final int limit;
+        private final java.util.function.Predicate<ItemStack> allowlist;
+        private final List<ItemStack> collected = new ArrayList<>();
+
+        public CollectSession(InternalInventory inv, int limit,
+                              java.util.function.Predicate<ItemStack> allowlist) {
+            super(inv);
+            this.limit = limit;
+            this.allowlist = allowlist;
+        }
+
+        public List<ItemStack> collected() {
+            return collected;
+        }
+
+        @Override
+        void visit(int slot) {
+            if (collected.size() >= limit) return;
+            ItemStack stack = inv.getStackInSlot(slot);
+            if (stack == null || stack.isEmpty()) return;
+            if (allowlist != null && !allowlist.test(stack)) return;
+            collected.add(stack.copy());
+        }
+
+        public boolean limitReached() {
+            return collected.size() >= limit;
+        }
+    }
+
+    /**
+     * One pass over the target that gathers <b>everything a paste needs</b>:
+     *
+     * <ul>
+     *   <li>the primary output of every occupied slot (the duplicate guard), and</li>
+     *   <li>the exact free slots an entry may be written into.</li>
+     * </ul>
+     *
+     * <p>Doing both in one walk is what keeps a paste to a single traversal. The earlier version
+     * scanned the container for outputs, called {@link #freeSlots} for the capacity check and then
+     * walked it a third time while placing — three full passes over a multi-thousand-slot matrix,
+     * which is why pasting was slow and its progress appeared to restart.</p>
+     *
+     * <p>The slot list is recorded while the session is quiet, so it stays valid for the whole
+     * placement: no other write happens in between.</p>
+     */
+    public static final class TargetScan extends BulkSession {
+        private final Level level;
+        private final java.util.function.Predicate<ItemStack> allowlist;
+        private final java.util.Set<AEKey> outputs = new java.util.HashSet<>();
+        private final List<Integer> freeSlots = new ArrayList<>();
+        /** Identity keys of stacks already decoded, so repeated patterns are parsed once. */
+        private final java.util.Set<String> seen = new java.util.HashSet<>();
+        private int occupied;
+
+        public TargetScan(InternalInventory inv, Level level,
+                          java.util.function.Predicate<ItemStack> allowlist) {
+            super(inv);
+            this.level = level;
+            this.allowlist = allowlist;
+        }
+
+        public java.util.Set<AEKey> outputs() {
+            return outputs;
+        }
+
+        /** Slot indexes that were empty when the scan ran, in ascending order. */
+        public List<Integer> freeSlots() {
+            return freeSlots;
+        }
+
+        /** The stricter per-container filter (the omniversal machinery), or {@code null}. */
+        public java.util.function.Predicate<ItemStack> allowlist() {
+            return allowlist;
+        }
+
+        /** Slots that already hold something (reported to the player as "container usage"). */
+        public int occupied() {
+            return occupied;
+        }
+
+        /**
+         * Records a slot that became free after the scan (replace mode vacating a duplicate's slot).
+         * Without this the replacement could not reuse the slot it had just cleared.
+         */
+        public void addFreeSlot(int slot) {
+            if (slot >= 0 && !freeSlots.contains(slot)) freeSlots.add(slot);
+        }
+
+        @Override
+        void visit(int slot) {
+            ItemStack stack = inv.getStackInSlot(slot);
+            if (stack == null || stack.isEmpty()) {
+                freeSlots.add(slot);
+                return;
+            }
+            occupied++;
+            // Decoding a pattern is the expensive half of a scan, and pattern slots are highly
+            // repetitive (a matrix typically holds the same handful of stacks many times over).
+            // Key each slot by item + components so an identical stack is decoded only once.
+            if (!seen.add(stack.getItem() + "\u0000" + stack.getComponents().toString())) return;
+            AEKey output = PatternOutputs.primaryOutput(stack, level);
+            if (output != null) outputs.add(output);
+        }
+    }
+
+    /**
+     * Writes pre-decided entries into pre-scanned slots. Both lists come from {@link TargetScan},
+     * so the placement is a straight copy with no further inspection of the container.
+     *
+     * <p>Entries are consumed from {@code pending} as they land, which is what lets the caller tell
+     * "placed" from "left over" without a second pass.</p>
+     */
+    public static final class PlaceSession implements AutoCloseable {
+        private final InternalInventory inv;
+        private final Object quiet;
+        /**
+         * The Useless Mod change-batch scope (see {@link ChangeBatch}): collapses the container's
+         * per-slot save into a single one when the scope closes.
+         */
+        private final ChangeBatch uselessBatch;
+        private final java.util.function.Predicate<ItemStack> allowlist;
+        /**
+         * Entries still to place. An {@link java.util.ArrayDeque} rather than a {@code List}:
+         * rotating refused entries moves the head to the tail, which is O(1) here and O(n) on an
+         * {@code ArrayList} — with thousands of entries that difference alone made a pasted batch
+         * crawl.
+         */
+        private final java.util.ArrayDeque<ItemStack> pending;
+        private final int[] slots;
+        private int slotCursor;
+        private int consecutiveSkips;
+        private int placed;
+        private final List<Placement> placements = new ArrayList<>();
+        /** Entries the container's own filter refused at least once (never placed, never consumed). */
+        private int filterRefused;
+        private boolean closed;
+
+        /** One verified write, retained so an interrupted paste can be rolled back exactly. */
+        public record Placement(int slot, ItemStack stack) {
+        }
+
+        /**
+         * @param allowlist extra filter stricter than the container's own (may be {@code null})
+         * @param pending   entries to place; entries that land are <b>consumed</b> from this queue
+         * @param slots     the free slots discovered by the scan, in the order they were found
+         */
+        public PlaceSession(InternalInventory inv, java.util.function.Predicate<ItemStack> allowlist,
+                            List<ItemStack> pending, List<Integer> slots) {
+            this.inv = inv;
+            this.quiet = beginQuiet(inv);
+            this.uselessBatch = ChangeBatch.open(inv);
+            this.allowlist = allowlist;
+            this.pending = new java.util.ArrayDeque<>(pending);
+            this.slots = new int[slots.size()];
+            for (int i = 0; i < slots.size(); i++) this.slots[i] = slots.get(i);
+        }
+
+        public int placed() {
+            return placed;
+        }
+
+        /** Free slots examined so far (drives the second half of the progress bar). */
+        public int slotsVisited() {
+            return slotCursor;
+        }
+
+        /** True when this container's per-slot save is being collapsed into one. */
+        public boolean batched() {
+            return uselessBatch != null;
+        }
+
+        /** Entries the container itself refused — the reason a paste can place nothing at all. */
+        public int filterRefused() {
+            return filterRefused;
+        }
+
+        /** Total free slots this session may write into. */
+        public int totalSlots() {
+            return slots.length;
+        }
+
+        /** True when every entry found a slot. */
+        public boolean pendingEmpty() {
+            return pending.isEmpty();
+        }
+
+        /** Entries that could not be placed (the caller keeps them in the tool). */
+        public List<ItemStack> leftover() {
+            return new ArrayList<>(pending);
+        }
+
+        /** Entries this session has successfully written so far. */
+        public List<Placement> placements() {
+            return List.copyOf(placements);
+        }
+
+        public synchronized boolean isClosed() {
+            return closed;
+        }
+
+        /**
+         * Places up to {@code budget} entries. Returns {@code true} when there is nothing left to
+         * place (either everything landed or every remaining entry was refused).
+         */
+        public boolean step(int minSlots, long deadline) {
+            if (pending.isEmpty()) return true;
+            int floor = Math.max(1, minSlots);
+            int processed = 0;
+            while (slotCursor < slots.length
+                    && (processed < floor || System.nanoTime() < deadline)) {
+                // Everything found a slot: stop immediately. Without this the loop kept going,
+                // peekFirst() returned null on the next empty slot, removeFirst() threw
+                // NoSuchElementException, and the abort skipped the write-back entirely — the
+                // container kept the patterns while the tool appeared not to consume them.
+                if (pending.isEmpty()) break;
+                int slot = slots[slotCursor];
+                slotCursor++;
+                processed++;
+                if (!inv.getStackInSlot(slot).isEmpty()) continue; // taken by someone else
+                ItemStack next = pending.peekFirst();
+                if (allowlist != null && !allowlist.test(next)) {
+                    filterRefused++;
+                    // Rotate and keep scanning; bail out once every remaining entry was refused in
+                    // a row so unfillable slots can never spin forever.
+                    pending.addLast(pending.removeFirst());
+                    if (++consecutiveSkips >= pending.size()) break;
+                    continue;
+                }
+                if (!accepts(inv, slot, next)) {
+                    filterRefused++;
+                    pending.addLast(pending.removeFirst());
+                    if (++consecutiveSkips >= pending.size()) break;
+                    continue;
+                }
+                consecutiveSkips = 0;
+                inv.setItemDirect(slot, next.copy());
+                if (inv.getStackInSlot(slot).isEmpty()) continue; // read-only/refused slot
+                pending.removeFirst();
+                placements.add(new Placement(slot, next.copy()));
+                placed++;
+            }
+            return pending.isEmpty() || slotCursor >= slots.length;
+        }
+
+        @Override
+        public synchronized void close() {
+            if (closed) return;
+            closed = true;
+            // Close the Useless batch first: it fires its one deferred change notification (and thus
+            // the single save) while AE2's re-entrancy flag is still raised, so the refresh that
+            // follows does not re-trigger a per-slot notification storm.
+            if (uselessBatch != null) uselessBatch.release();
+            endQuiet(inv, quiet);
+        }
+
+        /** Removes every write made by this session that is still present unchanged. */
+        public int rollback() {
+            return rollbackPlacements(inv, placements);
+        }
+    }
+
+    /** Best-effort exact undo for an interrupted placement session. */
+    private static int rollbackPlacements(InternalInventory inv, List<PlaceSession.Placement> placements) {
+        if (inv == null || placements == null || placements.isEmpty()) return 0;
+        Object quiet = beginQuiet(inv);
+        ChangeBatch batch = ChangeBatch.open(inv);
+        try {
+            int removed = 0;
+            for (int i = placements.size() - 1; i >= 0; i--) {
+                PlaceSession.Placement placement = placements.get(i);
+                ItemStack current = inv.getStackInSlot(placement.slot());
+                if (current == null || current.isEmpty()) continue;
+                if (!ItemStack.isSameItemSameComponents(current, placement.stack())) continue;
+                if (current.getCount() != placement.stack().getCount()) continue;
+                inv.setItemDirect(placement.slot(), ItemStack.EMPTY);
+                if (inv.getStackInSlot(placement.slot()).isEmpty()) removed++;
+            }
+            return removed;
+        } finally {
+            if (batch != null) batch.release();
+            endQuiet(inv, quiet);
+        }
+    }
+
     // --- notification handling -------------------------------------------------------------
 
     private static volatile Field notifyField;
@@ -936,6 +1552,9 @@ public final class PatternContainerAccess {
             }
         }
     }
+
+    private static final org.slf4j.Logger LOGGER =
+            org.slf4j.LoggerFactory.getLogger("Aurelium/PatternContainer");
 
     private static final Map<String, Optional<Field>> FIELD_CACHE = new ConcurrentHashMap<>();
 
