@@ -1,0 +1,9 @@
+{
+  "parent": "minecraft:item/generated",
+  "textures": {
+    "layer0": "aurelium:item/infinite_pink_base",
+    "layer1": "aurelium:item/infinite_pink_led",
+    "layer2": "aurelium:item/infinite_pink_frame",
+    "layer3": "aurelium:item/infinite_pink_flow"
+  }
+}

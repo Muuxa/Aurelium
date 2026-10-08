@@ -1,0 +1,14 @@
+{
+  "required": true,
+  "minVersion": "0.8.5",
+  "package": "com.muuxa.aurelium.compat.dataenergistics.mixin",
+  "plugin": "com.muuxa.aurelium.compat.dataenergistics.DEMixinPlugin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [
+    "DelegatingMEInventoryDEMixin",
+    "SupplierStorageDEMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

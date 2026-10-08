@@ -1,0 +1,39 @@
+{
+  "display": {
+    "icon": {
+      "id": "aurelium:star_vault",
+      "count": 1
+    },
+    "title": {
+      "translate": "advancements.aurelium.root.title"
+    },
+    "description": {
+      "translate": "advancements.aurelium.root.description"
+    },
+    "frame": "task",
+    "background": "minecraft:textures/block/pink_concrete.png",
+    "show_toast": true,
+    "announce_to_chat": true,
+    "hidden": false
+  },
+  "criteria": {
+    "has_vault": {
+      "trigger": "minecraft:inventory_changed",
+      "conditions": {
+        "items": [
+          {
+            "items": [
+              "aurelium:star_vault"
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "requirements": [
+    [
+      "has_vault"
+    ]
+  ],
+  "sends_telemetry_event": false
+}

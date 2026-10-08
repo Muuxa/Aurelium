@@ -1,0 +1,67 @@
+modLoader="javafml"
+loaderVersion="[2,)"
+license="${mod_license}"
+[[mods]]
+modId="${mod_id}"
+version="${mod_version}"
+# UTF-8 literal on purpose: ${mod_name} would pass through gradle.properties, which Gradle
+# decodes as ISO-8859-1, turning any CJK into mojibake. Keep the localised name here.
+displayName="Aurelium"
+authors="muuxa"
+description='''A rose-pink AE2 expansion: a boundless BigInteger vault, infinite cells and
+drives, and pattern cut/copy tools that move patterns between every supported provider.'''
+[[dependencies.aurelium]]
+modId="neoforge"
+type="required"
+# Valid open range: Minecraft dependency pins the version to 1.21.1.
+versionRange="[0,)"
+ordering="NONE"
+side="BOTH"
+[[dependencies.aurelium]]
+modId="minecraft"
+type="required"
+versionRange="[1.21.1]"
+ordering="NONE"
+side="BOTH"
+[[dependencies.aurelium]]
+modId="ae2"
+type="required"
+versionRange="[19.2.17,)"
+ordering="AFTER"
+side="BOTH"
+[[dependencies.aurelium]]
+# KubeJS is NOT a prerequisite; the bridge only loads if it is installed.
+modId="kubejs"
+type="optional"
+versionRange="[0,)"
+ordering="AFTER"
+side="BOTH"
+[[dependencies.aurelium]]
+# Optional interop: when present, the vault joins NeoEcoAE's exact-BigInteger
+# transport channel so a single transfer can exceed Long.MAX_VALUE.
+modId="neoecoae"
+type="optional"
+versionRange="[0,)"
+ordering="AFTER"
+side="BOTH"
+# The bridge mixins only load when NeoEcoAE is actually present; requiredMods keeps
+# FML from touching the config otherwise.
+[[mixins]]
+config="aurelium.neoecoae.mixins.json"
+requiredMods=["neoecoae"]
+[[dependencies.aurelium]]
+# Optional interop: when present, the vault exposes exact BigInteger contents to
+# Data_Energistics' exact accounting (read side). DE's own write path stays long.
+modId="data_energistics"
+type="optional"
+versionRange="[0,)"
+ordering="AFTER"
+side="BOTH"
+[[mixins]]
+config="aurelium.dataenergistics.mixins.json"
+requiredMods=["data_energistics"]
+
+# Client-only ∞ display in AE2 terminals; only applied on the physical client.
+[[mixins]]
+config="aurelium.client.mixins.json"
+

@@ -1,0 +1,14 @@
+{
+  "required": true,
+  "minVersion": "0.8.5",
+  "package": "com.muuxa.aurelium.compat.neoecoae.mixin",
+  "plugin": "com.muuxa.aurelium.compat.neoecoae.NeoEcoAEMixinPlugin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [
+    "DelegatingMEInventoryMixin",
+    "SupplierStorageMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

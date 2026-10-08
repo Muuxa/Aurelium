@@ -1,0 +1,81 @@
+plugins {
+    id 'java-library'
+    id 'net.neoforged.moddev' version '2.0.147'
+}
+
+version = mod_version
+group = mod_group_id
+base.archivesName = 'Aurelium'
+java.toolchain.languageVersion = JavaLanguageVersion.of(21)
+tasks.withType(JavaCompile).configureEach { options.encoding = 'UTF-8' }
+
+neoForge {
+    version = project.neo_version
+    runs {
+        client { client() }
+        server { server(); programArgument '--nogui' }
+    }
+    mods {
+        "${mod_id}" { sourceSet(sourceSets.main) }
+    }
+}
+
+repositories {
+    mavenCentral()
+    flatDir { dirs 'libs' }
+}
+
+dependencies {
+    // External mods: only present on the development classpath; never bundled inside AURELIUM's jar.
+    compileOnly "local:appliedenergistics2:${ae2_version}"
+    compileOnly "local:kubejs-neoforge:${kubejs_version}"
+    // Optional interop target. We only compile against NeoEcoAE's BigInteger transport
+    // contract; the bridge is loaded at runtime only when NeoEcoAE is actually present.
+    compileOnly "local:neoecoae:${neoecoae_version}"
+    // Optional read-side interop with Data_Energistics' exact accounting.
+    compileOnly "local:data_energistics:${data_energistics_version}"
+
+    // Note: Mixin/ASM is supplied by ModDevGradle (NeoForge bundles it), so there is no
+    // explicit mixin dependency here - Maven Central does not host org.spongepowered:mixin
+    // and adding it would break the whole dependency resolution.
+}
+
+// Expand only this template, so JSON files using ${...} are not touched.
+tasks.register('generateModMetadata', ProcessResources) {
+    // Read the source template as UTF-8 so the localised displayName survives expansion.
+    filteringCharset = 'UTF-8'
+    inputs.properties([mod_version: mod_version, mod_id: mod_id, mod_name: mod_name,
+                       mod_license: mod_license, neo_version: neo_version])
+    expand([mod_version: mod_version, mod_id: mod_id, mod_name: mod_name,
+            mod_license: mod_license, neo_version: neo_version])
+    from 'src/main/templates'
+    into 'build/generated/sources/modMetadata'
+}
+sourceSets.main.resources.srcDir tasks.named('generateModMetadata')
+// Copy data/assets (incl. lang/*.json) byte-for-byte as UTF-8; never let the platform
+// default charset mangle non-ASCII resource text.
+tasks.named('processResources', ProcessResources) {
+    filteringCharset = 'UTF-8'
+}
+neoForge.ideSyncTask tasks.named('generateModMetadata')
+
+// Ship the licence texts and third-party attribution inside the jar: the rose-pink cell layers
+// are derived from AE2's art (LGPL-3.0), and redistributing those derivatives requires the
+// licence text and attribution to travel with the distribution. Without this the published jar
+// would be non-compliant even though the repository itself is fine.
+tasks.named('processResources', ProcessResources) {
+    from('third_party/ae2') {
+        include 'LICENSE'
+        include 'GPL-3.txt'
+        include 'ATTRIBUTION.md'
+        into 'META-INF/aurelium/third_party/ae2'
+    }
+    from('LICENSE') {
+        into 'META-INF/aurelium'
+        rename { 'LICENSE-AURELIUM' }
+    }
+}
+
+jar {
+    manifest.attributes(['Implementation-Title': 'Aurelium', 'Implementation-Version': mod_version])
+}

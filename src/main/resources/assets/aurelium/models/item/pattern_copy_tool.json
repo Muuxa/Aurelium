@@ -1,0 +1,8 @@
+{
+  "parent": "minecraft:item/generated",
+  "textures": {
+    "layer0": "ae2:item/memory_card_base",
+    "layer1": "aurelium:item/pattern_tool_copy_hash",
+    "layer2": "aurelium:item/pattern_tool_copy_led"
+  }
+}

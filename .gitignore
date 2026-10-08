@@ -1,0 +1,37 @@
+# ---- Gradle / build output ----
+build/
+.gradle/
+out/
+
+# ---- Minecraft dev runs ----
+run/
+runs/
+
+# ---- IDEs ----
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.classpath
+.project
+.settings/
+bin/
+
+# ---- OS junk ----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- Local scratch / research (not part of the mod) ----
+.ae2lt_decompile/
+.tmp_*/
+tmp/
+
+# ---- Local backups / logs ----
+*.bak
+*.log
+
+# ---- Optional: keep the third-party compileOnly jars out of the repo.
+#      They are only needed to build; delete this block's '#' to exclude them.
+# libs/*.jar

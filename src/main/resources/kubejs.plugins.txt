@@ -1,0 +1,1 @@
+com.muuxa.aurelium.kubejs.AureliumKubeJSPlugin

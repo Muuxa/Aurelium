@@ -1,0 +1,11 @@
+{
+  "parent": "minecraft:item/generated",
+  "textures": {
+    "layer0": "aurelium:item/ae_pink_base",
+    "layer1": "aurelium:item/ae_pink_led",
+    "layer2": "aurelium:item/ae_pink_screen",
+    "layer3": "aurelium:item/ae_pink_side",
+    "layer4": "aurelium:item/ae_pink_flow",
+    "layer5": "aurelium:item/rose_halo"
+  }
+}
