@@ -549,7 +549,6 @@ public final class VaultExporter {
             emitPack(sb, path, rows, name, meta, rootDisplay);
         }
         sb.append('\n');
-        sb.append("})\n");
         // A pattern tool's replace flag lives in its own item NBT, and the export writes that NBT
         // verbatim into the item token — so the exported tool carries its paste mode with it, no
         // extra script statement needed (see stampToolReplace below).
