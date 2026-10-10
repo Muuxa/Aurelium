@@ -66,6 +66,15 @@ public final class PatternContainerAccess {
         if (level == null || level.isClientSide) return null;
         BlockEntity be = level.getBlockEntity(pos);
         if (be == null) return null;
+        // Useless Mod's Compact F9 keeps its pattern slots in a shadow "exposed bus" BE rather than
+        // on the crafting-system controller the player clicks. The bus implements the same ECO
+        // pattern-terminal contract as a normal ECO pattern bus, so unwrapping it here makes the
+        // whole cut/copy/paste pipeline work unchanged.
+        Object compactEco = compactEcoHost(be);
+        if (compactEco != null) {
+            InternalInventory compact = fromObject(compactEco);
+            if (compact != null) return compact;
+        }
         // A formed multiblock matrix wins over the single block: clicking any part of an
         // assembled matrix (housing, frame, or one of its pattern cores) must act on the whole
         // structure, exactly like the pattern access terminal shows it.
@@ -81,6 +90,7 @@ public final class PatternContainerAccess {
         if (level == null) return false;
         BlockEntity be = level.getBlockEntity(pos);
         if (be == null) return false;
+        if (compactEcoClass(be)) return true;
         if (be instanceof PatternContainer) return true;
         if (be instanceof IPartHost) return true;
         if (looksLikeMultiblock(be)) return true;
@@ -126,6 +136,32 @@ public final class PatternContainerAccess {
     private static InternalInventory fromPart(IPart part) {
         if (part == null) return null;
         return fromObject(part);
+    }
+
+    /** Useless Mod's compact crafting controller (currently Compact F9). */
+    private static final String USELESS_COMPACT_F9_BE =
+            "com.sorrowmist.useless.compat.neoecoae.compact.entity.CompactF9BlockEntity";
+
+    /** True without touching the shadow bus, so the client-side click can recognise the block. */
+    private static boolean compactEcoClass(BlockEntity be) {
+        return be != null && USELESS_COMPACT_F9_BE.equals(be.getClass().getName());
+    }
+
+    /**
+     * The shadow ECO bus that owns Compact F9's visible pattern page, or {@code null} when this
+     * block is not a compact controller (or is not assembled yet).
+     */
+    private static Object compactEcoHost(BlockEntity be) {
+        if (!compactEcoClass(be)) return null;
+        Field field = cachedField(be.getClass(), "exposedBus");
+        if (field == null) return null;
+        try {
+            Object bus = field.get(be);
+            if (bus == null || !hasEcoBulkApi(bus)) return null;
+            return fromObject(bus) != null ? bus : null;
+        } catch (Throwable ignored) {
+            return null;
+        }
     }
 
     private static boolean isUsable(InternalInventory inv) {
