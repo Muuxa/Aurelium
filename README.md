@@ -41,7 +41,7 @@ Aurelium 是一个樱粉主题的 **Applied Energistics 2** 扩展，围绕“�
 - 粘贴前会先读目标剩余容量：装得下一次贴完，装不下只贴能填的部分，剩余留在工具里。
 - 目标已有相同主产物的样板时默认跳过；可开“替换模式”换出后再贴。
 - 数据存在物品自身 NBT（gzip 压缩），可跨存档携带。
-- 兼容常见样板容器：AE2 样板供应器（方块 / 线缆部件）、ExtendedAE 装配矩阵、ExtendedAE-Plus 超级装配矩阵、闪电科技（AE2LT）、NeoEcoAE 样板总线、无用之物等。
+- 兼容常见样板容器：AE2 样板供应器（方块 / 线缆部件）、ExtendedAE 装配矩阵、ExtendedAE-Plus 超级装配矩阵、闪电科技（AE2LT）、NeoEcoAE 样板总线、数据能源三位一体样板管理、无用之物等。
 
 ### 进阶端口（Advanced IO Port）
 
@@ -60,7 +60,7 @@ Aurelium 是一个樱粉主题的 **Applied Energistics 2** 扩展，围绕“�
 | 加载器 | NeoForge 21.1+ |
 | **必需** | Applied Energistics 2 **19.2.17+** |
 | 可选 | KubeJS（脚本注册元件包 / 无限元件时） |
-| 可选 | NeoEcoAE、Data_Energistics（超 long 精确传输 / 读取） |
+| 可选 | NeoEcoAE、Data_Energistics（超 long 精确传输 / 读取，三位一体样板管理） |
 | 可选 | ExtendedAE / ExtendedAE-Plus / 闪电科技 / 无用之物等（样板容器兼容） |
 
 需要 Java 21。

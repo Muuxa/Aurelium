@@ -75,6 +75,12 @@ public final class PatternContainerAccess {
             InternalInventory compact = fromObject(compactEco);
             if (compact != null) return compact;
         }
+        // Data_Energistics' Trinity pattern management exposes its pattern storage through
+        // PatternContainer partitions / TrinityPatternCore.patternInventory(), but not through
+        // the controller block's own type. Bridge those public accessors reflectively so the
+        // optional DE dependency stays compile-time free.
+        InternalInventory trinity = fromDataEnergisticsTrinity(be);
+        if (trinity != null) return trinity;
         // A formed multiblock matrix wins over the single block: clicking any part of an
         // assembled matrix (housing, frame, or one of its pattern cores) must act on the whole
         // structure, exactly like the pattern access terminal shows it.
@@ -91,6 +97,7 @@ public final class PatternContainerAccess {
         BlockEntity be = level.getBlockEntity(pos);
         if (be == null) return false;
         if (compactEcoClass(be)) return true;
+        if (dataEnergisticsTrinityClass(be)) return true;
         if (be instanceof PatternContainer) return true;
         if (be instanceof IPartHost) return true;
         if (looksLikeMultiblock(be)) return true;
@@ -159,6 +166,75 @@ public final class PatternContainerAccess {
             Object bus = field.get(be);
             if (bus == null || !hasEcoBulkApi(bus)) return null;
             return fromObject(bus) != null ? bus : null;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    /** Data_Energistics Trinity pattern management controller / core / terminal partitions. */
+    private static final String DATA_ENERGISTICS_TRINITY_PREFIX =
+            "com.fish_dan_.data_energistics.";
+
+    private static boolean dataEnergisticsTrinityClass(BlockEntity be) {
+        if (be == null) return false;
+        if (!be.getClass().getName().startsWith(DATA_ENERGISTICS_TRINITY_PREFIX)) return false;
+        Class<?> type = be.getClass();
+        return methodBySignature(type, "patternInventory") != null
+                || methodBySignature(type, "terminalPartitions") != null
+                || methodBySignature(type, "getPatternCatalog") != null;
+    }
+
+    /**
+     * Trinity exposes pattern inventory through several public shapes:
+     *
+     * <ul>
+     *   <li>a pattern-core block directly through {@code patternInventory()};</li>
+     *   <li>an information-exchange depot through terminal partitions, each of which is an AE2
+     *       {@code PatternContainer};</li>
+     *   <li>the data-core controller through {@code getPatternCatalog().mountedCores()}, where
+     *       each mounted core exposes {@code patternInventory()}.</li>
+     * </ul>
+     *
+     * <p>We deliberately combine those inventories with {@link CompositeInventory}: the tools then
+     * work on the same slot set the Trinity UI presents, without needing a hard dependency on DE
+     * classes.</p>
+     */
+    private static InternalInventory fromDataEnergisticsTrinity(BlockEntity be) {
+        if (!dataEnergisticsTrinityClass(be)) return null;
+        List<InternalInventory> parts = new ArrayList<>();
+
+        InternalInventory direct = invokeInventory(be, "patternInventory");
+        if (isUsable(direct)) parts.add(direct);
+
+        Object partitions = invokeNoArg(be, "terminalPartitions");
+        if (partitions instanceof Iterable<?> iterable) {
+            for (Object partition : iterable) {
+                InternalInventory inv = fromObject(partition);
+                if (isUsable(inv)) parts.add(inv);
+            }
+        }
+
+        Object catalog = invokeNoArg(be, "getPatternCatalog");
+        Object mounts = invokeNoArg(catalog, "mountedCores");
+        if (mounts instanceof Iterable<?> iterable) {
+            for (Object mount : iterable) {
+                Object core = invokeNoArg(mount, "core");
+                InternalInventory inv = invokeInventory(core, "patternInventory");
+                if (isUsable(inv)) parts.add(inv);
+            }
+        }
+
+        if (parts.isEmpty()) return null;
+        return parts.size() == 1 ? parts.get(0) : new CompositeInventory(parts);
+    }
+
+    private static InternalInventory invokeInventory(Object owner, String method) {
+        if (owner == null) return null;
+        Method m = methodBySignature(owner.getClass(), method);
+        if (m == null) return null;
+        try {
+            Object value = m.invoke(owner);
+            return value instanceof InternalInventory inv && inv.size() > 0 ? inv : null;
         } catch (Throwable ignored) {
             return null;
         }
