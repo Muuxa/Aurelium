@@ -75,6 +75,8 @@ public final class PatternContainerAccess {
             InternalInventory compact = fromObject(compactEco);
             if (compact != null) return compact;
         }
+        InternalInventory ecoInterface = fromEcoMachineInterface(be);
+        if (ecoInterface != null) return ecoInterface;
         // Data_Energistics' Trinity pattern management exposes its pattern storage through
         // PatternContainer partitions / TrinityPatternCore.patternInventory(), but not through
         // the controller block's own type. Bridge those public accessors reflectively so the
@@ -97,6 +99,7 @@ public final class PatternContainerAccess {
         BlockEntity be = level.getBlockEntity(pos);
         if (be == null) return false;
         if (compactEcoClass(be)) return true;
+        if (ecoMachineInterfaceClass(be)) return true;
         if (dataEnergisticsTrinityClass(be)) return true;
         if (be instanceof PatternContainer) return true;
         if (be instanceof IPartHost) return true;
@@ -168,6 +171,93 @@ public final class PatternContainerAccess {
             return fromObject(bus) != null ? bus : null;
         } catch (Throwable ignored) {
             return null;
+        }
+    }
+
+    /** NeoEcoAE's crafting-subsystem communication interface. */
+    private static final String ECO_MACHINE_INTERFACE_BE =
+            "cn.dancingsnow.neoecoae.blocks.entity.ECOMachineInterfaceBlockEntity";
+
+    private static boolean ecoMachineInterfaceClass(BlockEntity be) {
+        if (be == null) return false;
+        for (Class<?> c = be.getClass(); c != null; c = c.getSuperclass()) {
+            if (ECO_MACHINE_INTERFACE_BE.equals(c.getName())) return true;
+        }
+        return false;
+    }
+
+    private static InternalInventory fromEcoMachineInterface(BlockEntity be) {
+        if (!ecoMachineInterfaceClass(be)) return null;
+        Method count = methodBySignature(be.getClass(), "getPatternInterfaceSlotCount");
+        Method get = methodBySignature(be.getClass(), "getPatternInterfaceStack");
+        Method set = declaredMethod(be.getClass(), "setPatternStack", 2);
+        Method refresh = methodBySignature(be.getClass(), "refreshPatternCatalog");
+        if (count == null || get == null || set == null) return null;
+        try {
+            Object value = count.invoke(be);
+            int size = value instanceof Integer i ? i : 0;
+            return size > 0 ? new EcoInterfaceInventory(be, size, get, set, refresh) : null;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    /**
+     * Read/write adapter for {@code ECOMachineInterfaceBlockEntity}. The interface presents its
+     * pattern slots through public getters and a private setter; wrapping it here lets the generic
+     * cut/copy/paste sessions use the same verified-write path as every other container.
+     */
+    private static final class EcoInterfaceInventory implements InternalInventory {
+        private final Object host;
+        private final int size;
+        private final Method get;
+        private final Method set;
+        private final Method refresh;
+
+        private EcoInterfaceInventory(Object host, int size, Method get, Method set, Method refresh) {
+            this.host = host;
+            this.size = size;
+            this.get = get;
+            this.set = set;
+            this.refresh = refresh;
+        }
+
+        @Override
+        public int size() {
+            return size;
+        }
+
+        @Override
+        public ItemStack getStackInSlot(int slot) {
+            if (slot < 0 || slot >= size) return ItemStack.EMPTY;
+            try {
+                Object value = get.invoke(host, slot);
+                return value instanceof ItemStack stack ? stack : ItemStack.EMPTY;
+            } catch (Throwable ignored) {
+                return ItemStack.EMPTY;
+            }
+        }
+
+        @Override
+        public void setItemDirect(int slot, ItemStack stack) {
+            if (slot < 0 || slot >= size) return;
+            try {
+                set.invoke(host, slot, stack == null ? ItemStack.EMPTY : stack);
+                if (host instanceof BlockEntity be) be.setChanged();
+                if (refresh != null) refresh.invoke(host);
+            } catch (Throwable ignored) {
+                // The caller verifies by reading the slot back, so a refused write stays uncounted.
+            }
+        }
+
+        @Override
+        public boolean isItemValid(int slot, ItemStack stack) {
+            return stack != null && !stack.isEmpty();
+        }
+
+        @Override
+        public int getSlotLimit(int slot) {
+            return 1;
         }
     }
 
@@ -961,6 +1051,7 @@ public final class PatternContainerAccess {
                 int expected = switch (name) {
                     case ECO_SET -> 2;
                     case ECO_INSERT -> 1;
+                    case "getPatternInterfaceStack" -> 1;
                     default -> 0;
                 };
                 for (Method m : owner.getMethods()) {
@@ -977,6 +1068,17 @@ public final class PatternContainerAccess {
             }
             return Optional.empty();
         }).orElse(null);
+    }
+
+    private static Method declaredMethod(Class<?> owner, String name, int parameterCount) {
+        for (Class<?> c = owner; c != null; c = c.getSuperclass()) {
+            for (Method m : c.getDeclaredMethods()) {
+                if (!m.getName().equals(name) || m.getParameterCount() != parameterCount) continue;
+                m.setAccessible(true);
+                return m;
+            }
+        }
+        return null;
     }
 
     // --- Useless Mod change batching ---------------------------------------------------------

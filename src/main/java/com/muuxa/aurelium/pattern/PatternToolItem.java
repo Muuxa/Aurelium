@@ -427,6 +427,8 @@ public class PatternToolItem extends Item {
 
         private final List<ItemStack> pending = new ArrayList<>();
         private final List<ItemStack> duplicateIncoming = new ArrayList<>();
+        /** Entries this specific container's tool-facing allowlist refuses outright. */
+        private final List<ItemStack> disallowedIncoming = new ArrayList<>();
         private final List<ItemStack> displaced = new ArrayList<>();
         private ToolRef held;
         private int placed;
@@ -596,7 +598,12 @@ public class PatternToolItem extends Item {
             boolean replaceMode = PatternToolData.isReplaceMode(held.stack());
             pending.clear();
             duplicateIncoming.clear();
+            disallowedIncoming.clear();
             for (ItemStack candidate : stored) {
+                if (scan.allowlist() != null && !scan.allowlist().test(candidate)) {
+                    disallowedIncoming.add(candidate);
+                    continue;
+                }
                 appeng.api.stacks.AEKey output = PatternOutputs.primaryOutput(candidate, level);
                 boolean duplicate = output != null
                         && (targetOutputs.contains(output) || !incoming.add(output));
@@ -621,8 +628,14 @@ public class PatternToolItem extends Item {
             }
             if (pending.isEmpty()) {
                 dropUnrestorable(player, displaced);
-                player.displayClientMessage(
-                        duplicatesMessage(duplicateIncoming.size(), invalid), true);
+                if (duplicateIncoming.isEmpty() && invalid == 0 && !disallowedIncoming.isEmpty()) {
+                    player.displayClientMessage(Component.translatable(
+                            "item.aurelium.pattern_tool.rejected_by_container",
+                            disallowedIncoming.size()), true);
+                } else {
+                    player.displayClientMessage(
+                            duplicatesMessage(duplicateIncoming.size(), invalid), true);
+                }
             }
         }
 
@@ -665,6 +678,10 @@ public class PatternToolItem extends Item {
                 if (idx != null) keptTag[idx] = true;
             }
             for (ItemStack leftover : duplicateIncoming) {
+                Integer idx = indexOf.get(leftover);
+                if (idx != null) keptTag[idx] = true;
+            }
+            for (ItemStack leftover : disallowedIncoming) {
                 Integer idx = indexOf.get(leftover);
                 if (idx != null) keptTag[idx] = true;
             }
@@ -730,19 +747,20 @@ public class PatternToolItem extends Item {
                 return;
             }
             if (remainingCount > 0) {
-                if (placed == 0 && refusedByContainer > 0
+                if (placed == 0 && (refusedByContainer > 0 || !disallowedIncoming.isEmpty())
                         && duplicateIncoming.size() + invalid < stored.size()) {
+                    int refused = refusedByContainer + disallowedIncoming.size();
                     player.displayClientMessage(Component.translatable(
-                            "item.aurelium.pattern_tool.rejected_by_container", refusedByContainer), true);
+                            "item.aurelium.pattern_tool.rejected_by_container", refused), true);
                     return;
                 }
-                if (duplicateIncoming.isEmpty() && invalid == 0) {
+                if (duplicateIncoming.isEmpty() && invalid == 0 && disallowedIncoming.isEmpty()) {
                     player.displayClientMessage(Component.translatable(
                             "item.aurelium.pattern_tool.pasted_partial", placed, remainingCount), true);
                 } else {
                     player.displayClientMessage(Component.translatable(
                             "item.aurelium.pattern_tool.pasted_partial_dup", placed, remainingCount,
-                            duplicateIncoming.size() + invalid), true);
+                            duplicateIncoming.size() + invalid + disallowedIncoming.size()), true);
                 }
             } else if (!duplicateIncoming.isEmpty() || invalid > 0) {
                 player.displayClientMessage(
@@ -761,10 +779,11 @@ public class PatternToolItem extends Item {
                 return;
             }
             if (placed == 0) {
-                if (refusedByContainer > 0
+                if ((refusedByContainer > 0 || !disallowedIncoming.isEmpty())
                         && duplicateIncoming.size() + invalid < stored.size()) {
+                    int refused = refusedByContainer + disallowedIncoming.size();
                     player.displayClientMessage(Component.translatable(
-                            "item.aurelium.pattern_tool.rejected_by_container", refusedByContainer), true);
+                            "item.aurelium.pattern_tool.rejected_by_container", refused), true);
                 } else {
                     player.displayClientMessage(
                             fullMessage(duplicateIncoming.size(), invalid,
