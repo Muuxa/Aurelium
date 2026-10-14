@@ -108,6 +108,22 @@ public final class PatternContainerAccess {
     }
 
     /**
+     * Some aggregate interfaces expose a logical merged pattern view as their "container". The
+     * ECO machine interface maps several pattern buses into one table, so a target-output precheck
+     * over that merged view is not a reliable duplicate test for one physical target. Let the
+     * interface's own slot write decide what is accepted.
+     */
+    public static boolean suppressDuplicatePrecheck(InternalInventory inv) {
+        return inv instanceof EcoInterfaceInventory;
+    }
+
+    /** True when this exact target slot's physical backing bus already has the same primary output. */
+    public static boolean hasPrimaryOutputAtSlot(InternalInventory inv, int slot, ItemStack candidate, Level level) {
+        return inv instanceof EcoInterfaceInventory eco
+                && eco.hasPrimaryOutputAtSlot(slot, candidate, level);
+    }
+
+    /**
      * Shared lookup for block entities <b>and</b> cable-mounted parts: interface first, then the
      * cached reflective fallback (covers add-ons that expose the method without implementing the
      * interface).
@@ -192,11 +208,12 @@ public final class PatternContainerAccess {
         Method get = methodBySignature(be.getClass(), "getPatternInterfaceStack");
         Method set = declaredMethod(be.getClass(), "setPatternStack", 2);
         Method refresh = methodBySignature(be.getClass(), "refreshPatternCatalog");
+        Field refsField = cachedField(be.getClass(), "patternSlotRefs");
         if (count == null || get == null || set == null) return null;
         try {
             Object value = count.invoke(be);
             int size = value instanceof Integer i ? i : 0;
-            return size > 0 ? new EcoInterfaceInventory(be, size, get, set, refresh) : null;
+            return size > 0 ? new EcoInterfaceInventory(be, size, get, set, refresh, refsField) : null;
         } catch (Throwable ignored) {
             return null;
         }
@@ -213,13 +230,16 @@ public final class PatternContainerAccess {
         private final Method get;
         private final Method set;
         private final Method refresh;
+        private final Field refsField;
 
-        private EcoInterfaceInventory(Object host, int size, Method get, Method set, Method refresh) {
+        private EcoInterfaceInventory(Object host, int size, Method get, Method set, Method refresh,
+                                      Field refsField) {
             this.host = host;
             this.size = size;
             this.get = get;
             this.set = set;
             this.refresh = refresh;
+            this.refsField = refsField;
         }
 
         @Override
@@ -258,6 +278,31 @@ public final class PatternContainerAccess {
         @Override
         public int getSlotLimit(int slot) {
             return 1;
+        }
+
+        private boolean hasPrimaryOutputAtSlot(int slot, ItemStack candidate, Level level) {
+            if (refsField == null || candidate == null || candidate.isEmpty() || level == null) return false;
+            AEKey wanted = PatternOutputs.primaryOutput(candidate, level);
+            if (wanted == null) return false;
+            try {
+                Object refsValue = refsField.get(host);
+                if (!(refsValue instanceof List<?> refs) || slot < 0 || slot >= refs.size()) return false;
+                Object ref = refs.get(slot);
+                Object bus = invokeNoArg(ref, "bus");
+                Object localValue = invokeNoArg(ref, "slot");
+                int local = localValue instanceof Integer i ? i : -1;
+                InternalInventory target = invokeInventory(bus, "getPatternSlotInventory");
+                if (target == null) return false;
+                for (int i = 0; i < target.size(); i++) {
+                    if (i == local) continue;
+                    ItemStack stack = target.getStackInSlot(i);
+                    if (stack == null || stack.isEmpty()) continue;
+                    if (wanted.equals(PatternOutputs.primaryOutput(stack, level))) return true;
+                }
+            } catch (Throwable ignored) {
+                return false;
+            }
+            return false;
         }
     }
 
@@ -1499,6 +1544,7 @@ public final class PatternContainerAccess {
      */
     public static final class PlaceSession implements AutoCloseable {
         private final InternalInventory inv;
+        private final Level level;
         private final Object quiet;
         /**
          * The Useless Mod change-batch scope (see {@link ChangeBatch}): collapses the container's
@@ -1520,6 +1566,8 @@ public final class PatternContainerAccess {
         private final List<Placement> placements = new ArrayList<>();
         /** Entries the container's own filter refused at least once (never placed, never consumed). */
         private int filterRefused;
+        /** Entries skipped because the target slot's physical backing container already has that output. */
+        private int duplicateRefused;
         private boolean closed;
 
         /** One verified write, retained so an interrupted paste can be rolled back exactly. */
@@ -1532,8 +1580,9 @@ public final class PatternContainerAccess {
          * @param slots     the free slots discovered by the scan, in the order they were found
          */
         public PlaceSession(InternalInventory inv, java.util.function.Predicate<ItemStack> allowlist,
-                            List<ItemStack> pending, List<Integer> slots) {
+                            List<ItemStack> pending, List<Integer> slots, Level level) {
             this.inv = inv;
+            this.level = level;
             this.quiet = beginQuiet(inv);
             this.uselessBatch = ChangeBatch.open(inv);
             this.allowlist = allowlist;
@@ -1559,6 +1608,11 @@ public final class PatternContainerAccess {
         /** Entries the container itself refused — the reason a paste can place nothing at all. */
         public int filterRefused() {
             return filterRefused;
+        }
+
+        /** Entries skipped by the target slot's physical-container duplicate guard. */
+        public int duplicateRefused() {
+            return duplicateRefused;
         }
 
         /** Total free slots this session may write into. */
@@ -1605,6 +1659,12 @@ public final class PatternContainerAccess {
                 processed++;
                 if (!inv.getStackInSlot(slot).isEmpty()) continue; // taken by someone else
                 ItemStack next = pending.peekFirst();
+                if (hasPrimaryOutputAtSlot(inv, slot, next, level)) {
+                    duplicateRefused++;
+                    pending.addLast(pending.removeFirst());
+                    if (++consecutiveSkips >= pending.size()) break;
+                    continue;
+                }
                 if (allowlist != null && !allowlist.test(next)) {
                     filterRefused++;
                     // Rotate and keep scanning; bail out once every remaining entry was refused in

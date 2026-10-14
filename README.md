@@ -26,6 +26,7 @@ Aurelium 是一个樱粉主题的 **Applied Energistics 2** 扩展，围绕“�
 - AE2 终端里显示为 `∞`。
 - 悬停时以“一排物品图标 + 右下角 `∞`”展示被标记的内容。
 - 自带一个「无限混凝土」预设（`aurelium:infinite_concrete`，16 色混凝土）。
+- 悬停预览按每行 10 个、最多 10 行显示；超过 100 个条目后可用 Shift + 滚轮翻页。
 
 ### 无限磁盘（Infinite Disk）
 
@@ -134,6 +135,28 @@ AureliumPacks.register('demo:supply', '星穹补给', ['64x minecraft:diamond'])
 ```
 
 更多用法见 `examples/kubejs/`。
+
+---
+
+## 外部模组 API
+
+外部 Java / NeoForge 模组可以直接注册带名称和样板内容的剪切 / 复制工具：
+
+```java
+public static final DeferredRegister.Items ITEMS =
+        DeferredRegister.createItems("your_modid");
+
+public static final DeferredItem<PatternToolItem> AUTO_CUT_TOOL =
+        ITEMS.register("auto_cut_tool", () ->
+                AureliumPatternTools.item(new Item.Properties().stacksTo(1), false)
+                        .toolName("自动剪切工具")
+                        .patterns(List.of(pattern1, pattern2))
+                        .replaceMode(false)
+                        .build()
+        );
+```
+
+`AureliumPatternTools` 也提供运行时封装：`payloadBase64(...)`、`apply(...)`、`storedPatterns(...)`。
 
 ---
 

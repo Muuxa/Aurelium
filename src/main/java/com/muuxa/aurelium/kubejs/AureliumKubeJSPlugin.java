@@ -5,6 +5,7 @@ import com.muuxa.aurelium.api.AureliumExport;
 import com.muuxa.aurelium.api.AureliumPacks;
 import com.muuxa.aurelium.api.AureliumInfinite;
 import com.muuxa.aurelium.api.AureliumInfiniteCellAPI;
+import com.muuxa.aurelium.api.AureliumPatternTools;
 import com.muuxa.aurelium.api.InfiniteKindBuilder;
 import com.muuxa.aurelium.api.InfiniteKindSpec;
 import com.muuxa.aurelium.api.AureliumVaultTree;
@@ -26,6 +27,7 @@ public final class AureliumKubeJSPlugin implements KubeJSPlugin {
         filter.allow(InfiniteKindBuilder.class);
         filter.allow(InfiniteKindSpec.class);
         filter.allow(AureliumInfiniteCellAPI.class);
+        filter.allow(AureliumPatternTools.class);
         filter.allow(AureliumVaultTree.class);
         filter.allow(InfiniteCellItemBuilder.class);
         filter.allow(VaultItemBuilder.class);
@@ -38,6 +40,7 @@ public final class AureliumKubeJSPlugin implements KubeJSPlugin {
         bindings.add("AureliumExport", AureliumExport.class);
         bindings.add("AureliumInfinite", AureliumInfinite.class);
         bindings.add("AureliumInfiniteCell", AureliumInfiniteCellAPI.class);
+        bindings.add("AureliumPatternTools", AureliumPatternTools.class);
         bindings.add("AureliumVaultTree", AureliumVaultTree.class);
     }
 

@@ -432,7 +432,7 @@ public class PatternToolItem extends Item {
         private final List<ItemStack> displaced = new ArrayList<>();
         private ToolRef held;
         private int placed;
-        /** Entries this paste intends to place (denominator of the placement progress line). */
+        /** Slots this paste intends to inspect (denominator of the placement progress line). */
         private int placeTotal;
         private int phase; // 0 = decode, 1 = scan, 2 = place, 3 = write back, 4 = done
         private boolean pendingBackground;
@@ -562,12 +562,11 @@ public class PatternToolItem extends Item {
                 return PatternToolWorker.Progress.DONE;
             }
             placeSession = new PatternContainerAccess.PlaceSession(inv, scan.allowlist(),
-                    pending, free);
-            // Third phase, counted in ENTRIES rather than container slots: that is the number the
-            // player is actually waiting on ("placed 320 / 656"), and it keeps moving while the
-            // placement runs. Previously this phase reused the slot count, so the line sat frozen
-            // at the scan's end value (2077 / 2077).
-            placeTotal = pending.size();
+                    pending, free, level);
+            // Count the placement phase in slots, not placed entries. When a container rejects
+            // every pending pattern, no entry is consumed, but the slot cursor still advances; using
+            // "placed" here made the action bar look frozen for the whole rejection scan.
+            placeTotal = Math.max(1, free.size());
             PatternToolWorker.setPhase(player, PROGRESS_PASTE, Math.max(1, placeTotal));
             phase = 2;
             return PatternToolWorker.Progress.CONTINUE;
@@ -576,13 +575,14 @@ public class PatternToolItem extends Item {
         private PatternToolWorker.Progress placePhase(ServerPlayer player, int minSlots, long deadline) {
             boolean complete = placeSession.step(minSlots, deadline);
             placed = placeSession.placed();
-            PatternToolWorker.setProgress(player, placed);
+            PatternToolWorker.setProgress(player, placeSession.slotsVisited());
             if (!complete) return PatternToolWorker.Progress.CONTINUE;
             // Replace the pending list with what the session could not place, so the write-back
             // below keeps exactly the entries that did NOT land (and the paste consumes the rest).
             pending.clear();
             pending.addAll(placeSession.leftover());
             refusedByContainer = placeSession.filterRefused();
+            duplicateBySlot = placeSession.duplicateRefused();
             batchingActive = placeSession.batched();
             phase = 3;
             return PatternToolWorker.Progress.CONTINUE;
@@ -594,7 +594,7 @@ public class PatternToolItem extends Item {
          */
         private void decidePlacement(ServerPlayer player) {
             java.util.Set<appeng.api.stacks.AEKey> targetOutputs = scan.outputs();
-            java.util.Set<appeng.api.stacks.AEKey> incoming = new java.util.HashSet<>();
+            boolean precheckDuplicates = !PatternContainerAccess.suppressDuplicatePrecheck(inv);
             boolean replaceMode = PatternToolData.isReplaceMode(held.stack());
             pending.clear();
             duplicateIncoming.clear();
@@ -605,8 +605,10 @@ public class PatternToolItem extends Item {
                     continue;
                 }
                 appeng.api.stacks.AEKey output = PatternOutputs.primaryOutput(candidate, level);
-                boolean duplicate = output != null
-                        && (targetOutputs.contains(output) || !incoming.add(output));
+                // Compare only against the target container's existing contents. Some merged
+                // interfaces (ECO machine interface) cannot provide a trustworthy target-output set,
+                // so duplicate prechecking is disabled for them and the slot write remains final.
+                boolean duplicate = precheckDuplicates && output != null && targetOutputs.contains(output);
                 if (!duplicate) {
                     pending.add(candidate);
                     continue;
@@ -628,13 +630,13 @@ public class PatternToolItem extends Item {
             }
             if (pending.isEmpty()) {
                 dropUnrestorable(player, displaced);
-                if (duplicateIncoming.isEmpty() && invalid == 0 && !disallowedIncoming.isEmpty()) {
+                if (duplicateCount() == 0 && invalid == 0 && !disallowedIncoming.isEmpty()) {
                     player.displayClientMessage(Component.translatable(
                             "item.aurelium.pattern_tool.rejected_by_container",
                             disallowedIncoming.size()), true);
                 } else {
                     player.displayClientMessage(
-                            duplicatesMessage(duplicateIncoming.size(), invalid), true);
+                            duplicatesMessage(duplicateCount(), invalid), true);
                 }
             }
         }
@@ -648,9 +650,9 @@ public class PatternToolItem extends Item {
             dropUnrestorable(player, displaced);
             int refused = placeSession != null ? placeSession.filterRefused() : 0;
             int storedTotal = stored == null ? 0 : stored.size();
-            if (storedTotal > 0 && duplicateIncoming.size() >= storedTotal) {
+            if (storedTotal > 0 && duplicateCount() >= storedTotal) {
                 player.displayClientMessage(
-                        duplicatesMessage(duplicateIncoming.size(), invalid), true);
+                        duplicatesMessage(duplicateCount(), invalid), true);
                 return;
             }
             if (refused > 0) {
@@ -659,7 +661,7 @@ public class PatternToolItem extends Item {
                 return;
             }
             player.displayClientMessage(
-                    fullMessage(duplicateIncoming.size(), invalid,
+                    fullMessage(duplicateCount(), invalid,
                             scan == null ? 0 : scan.occupied(),
                             scan == null ? 0 : scan.freeSlots().size()),
                     true);
@@ -702,6 +704,8 @@ public class PatternToolItem extends Item {
         private byte[] pendingCompressed;
         /** Diagnostics carried from the placement phase into the final report. */
         private int refusedByContainer;
+        /** Duplicates found against each slot's physical backing container during placement. */
+        private int duplicateBySlot;
         private boolean batchingActive;
         private boolean resolved;
         private ServerPlayer owner;
@@ -748,23 +752,23 @@ public class PatternToolItem extends Item {
             }
             if (remainingCount > 0) {
                 if (placed == 0 && (refusedByContainer > 0 || !disallowedIncoming.isEmpty())
-                        && duplicateIncoming.size() + invalid < stored.size()) {
+                        && duplicateCount() + invalid < stored.size()) {
                     int refused = refusedByContainer + disallowedIncoming.size();
                     player.displayClientMessage(Component.translatable(
                             "item.aurelium.pattern_tool.rejected_by_container", refused), true);
                     return;
                 }
-                if (duplicateIncoming.isEmpty() && invalid == 0 && disallowedIncoming.isEmpty()) {
+                if (duplicateCount() == 0 && invalid == 0 && disallowedIncoming.isEmpty()) {
                     player.displayClientMessage(Component.translatable(
                             "item.aurelium.pattern_tool.pasted_partial", placed, remainingCount), true);
                 } else {
                     player.displayClientMessage(Component.translatable(
                             "item.aurelium.pattern_tool.pasted_partial_dup", placed, remainingCount,
-                            duplicateIncoming.size() + invalid + disallowedIncoming.size()), true);
+                            duplicateCount() + invalid + disallowedIncoming.size()), true);
                 }
-            } else if (!duplicateIncoming.isEmpty() || invalid > 0) {
+            } else if (duplicateCount() > 0 || invalid > 0) {
                 player.displayClientMessage(
-                        duplicatesMessage(duplicateIncoming.size(), invalid), true);
+                        duplicatesMessage(duplicateCount(), invalid), true);
             } else {
                 player.displayClientMessage(Component.translatable(
                         "item.aurelium.pattern_tool.pasted", placed), true);
@@ -780,21 +784,21 @@ public class PatternToolItem extends Item {
             }
             if (placed == 0) {
                 if ((refusedByContainer > 0 || !disallowedIncoming.isEmpty())
-                        && duplicateIncoming.size() + invalid < stored.size()) {
+                        && duplicateCount() + invalid < stored.size()) {
                     int refused = refusedByContainer + disallowedIncoming.size();
                     player.displayClientMessage(Component.translatable(
                             "item.aurelium.pattern_tool.rejected_by_container", refused), true);
                 } else {
                     player.displayClientMessage(
-                            fullMessage(duplicateIncoming.size(), invalid,
+                            fullMessage(duplicateCount(), invalid,
                                     scan == null ? 0 : scan.occupied(),
                                     scan == null ? 0 : scan.freeSlots().size()), true);
                 }
                 return;
             }
-            if (!duplicateIncoming.isEmpty() || invalid > 0) {
+            if (duplicateCount() > 0 || invalid > 0) {
                 player.displayClientMessage(
-                        duplicatesMessage(duplicateIncoming.size(), invalid), true);
+                        duplicatesMessage(duplicateCount(), invalid), true);
             } else if (placed < stored.size()) {
                 player.displayClientMessage(Component.translatable(
                         "item.aurelium.pattern_tool.pasted_partial_copy", placed,
@@ -823,6 +827,10 @@ public class PatternToolItem extends Item {
 
         private void closePlaceSession() {
             if (placeSession != null && !placeSession.isClosed()) placeSession.close();
+        }
+
+        private int duplicateCount() {
+            return duplicateIncoming.size() + duplicateBySlot;
         }
     }
     /** A decoded payload: the usable stacks, the tag index each came from, and the dead count. */

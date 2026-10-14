@@ -4,10 +4,16 @@ import com.muuxa.aurelium.pattern.PatternToolData;
 import com.muuxa.aurelium.pattern.PatternToolItem;
 import dev.latvian.mods.kubejs.item.ItemBuilder;
 import net.minecraft.core.component.DataComponents;
+import net.minecraft.core.RegistryAccess;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.item.Item;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.component.CustomData;
+
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * KubeJS item builder for a <b>pattern tool restored from an export</b>.
@@ -20,9 +26,9 @@ import net.minecraft.world.item.component.CustomData;
  * <pre>
  *   StartupEvents.registry('item', event =&gt; {
  *     event.create('aurelium:export_tool_star_scissors', 'aurelium:pattern_tool')
- *          .displayName('明星剪刀')
+ *          .toolName('明星剪刀')
  *          .copyTool(false)
- *          .toolPayload('H4sIAAAAAAAA…')
+ *          .patterns([Item.of('ae2:processing_pattern'), Item.of('useless_mod:omniversal_pattern')])
  *          .replaceMode(false);
  *   });
  * </pre>
@@ -33,6 +39,8 @@ import net.minecraft.world.item.component.CustomData;
 public class PatternToolItemBuilder extends ItemBuilder {
     /** Base64 gzip payload written by the exporter; {@code null} for an empty tool. */
     private String toolPayload;
+    /** Live pattern stacks supplied by an API/script registration; takes precedence over base64. */
+    private List<ItemStack> patternStacks;
     /** {@code true} builds the copy tool, {@code false} the cut tool. */
     private boolean copyTool;
     /** Replace same-primary-output patterns when pasting (see {@link PatternToolData}). */
@@ -55,6 +63,24 @@ public class PatternToolItemBuilder extends ItemBuilder {
         return this;
     }
 
+    /** Tool display name. Equivalent to KubeJS's displayName, exposed for Java-facing callers. */
+    public PatternToolItemBuilder toolName(String name) {
+        String value = name == null ? "" : name;
+        this.name(stack -> Component.literal(value));
+        return this;
+    }
+
+    /** Pattern stacks to place in the tool's default payload. */
+    public PatternToolItemBuilder patterns(Object patterns) {
+        this.patternStacks = copyStacks(patterns);
+        return this;
+    }
+
+    /** Alias with a clearer name for scripts. */
+    public PatternToolItemBuilder patternStacks(Object patterns) {
+        return patterns(patterns);
+    }
+
     /** {@code true} = copy tool, {@code false} = cut tool. */
     public PatternToolItemBuilder copyTool(boolean copy) {
         this.copyTool = copy;
@@ -70,12 +96,44 @@ public class PatternToolItemBuilder extends ItemBuilder {
     @Override
     public Item createObject() {
         CompoundTag data = new CompoundTag();
-        CompoundTag payload = PatternToolData.payloadTag(toolPayload);
+        CompoundTag payload = null;
+        if (patternStacks != null && !patternStacks.isEmpty()) {
+            payload = PatternToolData.payloadTagFromStacks(patternStacks, RegistryAccess.EMPTY);
+            if (payload == null) {
+                throw new IllegalArgumentException("Pattern tool payload is too large or cannot be encoded");
+            }
+        } else {
+            payload = PatternToolData.payloadTag(toolPayload);
+        }
         if (payload != null) data.merge(payload);
         PatternToolData.putReplaceMode(data, replaceMode);
         if (!data.isEmpty()) {
             this.component(DataComponents.CUSTOM_DATA, CustomData.of(data));
         }
         return new PatternToolItem(this.createItemProperties(), copyTool);
+    }
+
+    private static List<ItemStack> copyStacks(Object raw) {
+        List<ItemStack> out = new ArrayList<>();
+        if (raw instanceof ItemStack stack) {
+            if (!stack.isEmpty()) out.add(stack.copy());
+            return out;
+        }
+        if (raw instanceof Iterable<?> iterable) {
+            for (Object value : iterable) {
+                if (value instanceof ItemStack stack && !stack.isEmpty()) {
+                    out.add(stack.copy());
+                }
+            }
+            return out;
+        }
+        if (raw instanceof Object[] array) {
+            for (Object value : array) {
+                if (value instanceof ItemStack stack && !stack.isEmpty()) {
+                    out.add(stack.copy());
+                }
+            }
+        }
+        return out;
     }
 }

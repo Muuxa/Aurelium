@@ -17,8 +17,8 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Renders {@link InfiniteIconsTooltip}: a row of item icons, each with {@code ∞} at the
- * icon's bottom-right corner — the look asked for (an icon labelled ∞, not an item name).
+ * Renders {@link InfiniteIconsTooltip}: a 10-column grid of item icons, each with {@code ∞}
+ * at the icon's bottom-right corner. The data component already carries the current page.
  *
  * <p>Only {@code getHeight}/{@code getWidth}/{@code renderImage} are overridden;
  * {@code renderText} is left as the interface default (we draw no text line).</p>
@@ -29,6 +29,7 @@ import java.util.List;
  */
 public final class ClientInfiniteIconsTooltip implements ClientTooltipComponent {
     private static final int SPACING = 18;
+    private static final int COLUMNS = 10;
     private final List<ItemStack> icons;
 
     public ClientInfiniteIconsTooltip(InfiniteIconsTooltip data) {
@@ -71,22 +72,27 @@ public final class ClientInfiniteIconsTooltip implements ClientTooltipComponent 
 
     @Override
     public int getHeight() {
-        return SPACING;
+        return rows() * SPACING;
     }
 
     @Override
     public int getWidth(Font font) {
-        return Math.max(0, icons.size()) * SPACING;
+        return Math.min(COLUMNS, Math.max(0, icons.size())) * SPACING;
     }
 
     @Override
     public void renderImage(Font font, int x, int y, GuiGraphics graphics) {
-        int cx = x + 1;
-        for (ItemStack icon : icons) {
-            graphics.renderItem(icon, cx, y + 1);
+        for (int i = 0; i < icons.size(); i++) {
+            ItemStack icon = icons.get(i);
+            int cx = x + 1 + (i % COLUMNS) * SPACING;
+            int cy = y + 1 + (i / COLUMNS) * SPACING;
+            graphics.renderItem(icon, cx, cy);
             // "∞" at the icon's bottom-right, exactly like a stack-size label.
-            graphics.renderItemDecorations(font, icon, cx, y + 1, "∞");
-            cx += SPACING;
+            graphics.renderItemDecorations(font, icon, cx, cy, "∞");
         }
+    }
+
+    private int rows() {
+        return (icons.size() + COLUMNS - 1) / COLUMNS;
     }
 }

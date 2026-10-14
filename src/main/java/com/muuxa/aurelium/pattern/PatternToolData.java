@@ -628,6 +628,30 @@ public final class PatternToolData {
         return tag;
     }
 
+    /**
+     * Builds the custom-data payload for a tool from live pattern stacks. Intended for
+     * registration/API callers that do not want to round-trip through an exported Base64 string.
+     */
+    public static CompoundTag payloadTagFromStacks(List<ItemStack> patterns,
+                                                   HolderLookup.Provider registries) {
+        if (patterns == null || patterns.isEmpty()) return null;
+        ListTag list = encode(patterns, registries);
+        if (list.isEmpty()) return null;
+        byte[] compressed = compress(list);
+        if (compressed == null || compressed.length > MAX_COMPRESSED_BYTES) return null;
+        CompoundTag tag = new CompoundTag();
+        tag.put(KEY_COMPRESSED, new ByteArrayTag(compressed));
+        tag.putInt(KEY_COUNT, list.size());
+        return tag;
+    }
+
+    /** Base64 form of {@link #payloadTagFromStacks(List, HolderLookup.Provider)}. */
+    public static String toBase64Payload(List<ItemStack> patterns, HolderLookup.Provider registries) {
+        CompoundTag tag = payloadTagFromStacks(patterns, registries);
+        if (tag == null) return null;
+        return java.util.Base64.getEncoder().encodeToString(tag.getByteArray(KEY_COMPRESSED));
+    }
+
     /** Records the replace-on-paste flag into a data tag (used by the KubeJS tool builder). */
     public static void putReplaceMode(CompoundTag tag, boolean replace) {
         if (replace) {
