@@ -60,6 +60,28 @@ side="BOTH"
 [[mixins]]
 config="aurelium.dataenergistics.mixins.json"
 requiredMods=["data_energistics"]
+[[dependencies.aurelium]]
+# Optional interop: when present, the OI port implements AE2LT's frequency
+# binding host so the overloaded frequency card can link to it wirelessly.
+modId="ae2lt"
+type="optional"
+versionRange="[0,)"
+ordering="AFTER"
+side="BOTH"
+[[mixins]]
+config="aurelium.ae2lt.mixins.json"
+requiredMods=["ae2lt"]
+[[dependencies.aurelium]]
+# Optional interop: the construction wand removes blocks without a loot table,
+# so AURELIUM pops its OI port explicitly when that wand destroys one.
+modId="useless_mod"
+type="optional"
+versionRange="[0,)"
+ordering="AFTER"
+side="BOTH"
+[[mixins]]
+config="aurelium.useless.mixins.json"
+requiredMods=["useless_mod"]
 
 # Client-only ∞ display in AE2 terminals; only applied on the physical client.
 [[mixins]]

@@ -5,6 +5,7 @@ import appeng.api.config.OperationMode;
 import appeng.api.config.Settings;
 import appeng.api.networking.IGrid;
 import appeng.api.networking.IGridNode;
+import appeng.api.networking.IGridNodeListener;
 import appeng.api.networking.security.IActionSource;
 import appeng.api.networking.ticking.TickRateModulation;
 import appeng.api.networking.ticking.TickingRequest;
@@ -15,6 +16,8 @@ import appeng.blockentity.storage.IOPortBlockEntity;
 import appeng.me.helpers.MachineSource;
 import appeng.util.inv.AppEngInternalInventory;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.HolderLookup;
+import net.minecraft.nbt.CompoundTag;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.entity.BlockEntityType;
 import net.minecraft.world.level.block.state.BlockState;
@@ -104,6 +107,8 @@ public class TileAdvanceIOPort extends IOPortBlockEntity {
 
     @Override
     public TickRateModulation tickingRequest(IGridNode node, int ticksSinceLastCall) {
+        // AE2 Lightning Tech frequency binding (no-op without the mod).
+        com.muuxa.aurelium.compat.ae2lt.AE2LTFrequencyHooks.tick(this);
         if (!this.getMainNode().isActive()) {
             return TickRateModulation.IDLE;
         }
@@ -156,6 +161,54 @@ public class TileAdvanceIOPort extends IOPortBlockEntity {
         // showed up as "slow / the import direction does nothing". IDLE just keeps it ticking at its
         // configured max rate (1 = every tick).
         return moved ? TickRateModulation.URGENT : TickRateModulation.IDLE;
+    }
+
+    // --- AE2 Lightning Tech frequency binding lifecycle -------------------------------
+    //
+    // The calls below only reach AE2LT when its gated mixin registered a binding for this
+    // instance; without the mod they do nothing. Keeping them here (rather than in the mixin)
+    // means the port works identically with and without AE2LT.
+
+    @Override
+    public void onReady() {
+        super.onReady();
+        com.muuxa.aurelium.compat.ae2lt.AE2LTFrequencyHooks.onReady(this);
+    }
+
+    @Override
+    public void setRemoved() {
+        com.muuxa.aurelium.compat.ae2lt.AE2LTFrequencyHooks.setRemoved(this);
+        super.setRemoved();
+    }
+
+    @Override
+    public void clearRemoved() {
+        super.clearRemoved();
+        com.muuxa.aurelium.compat.ae2lt.AE2LTFrequencyHooks.clearRemoved(this);
+    }
+
+    @Override
+    public void onChunkUnloaded() {
+        com.muuxa.aurelium.compat.ae2lt.AE2LTFrequencyHooks.onChunkUnloaded(this);
+        super.onChunkUnloaded();
+    }
+
+    @Override
+    public void onMainNodeStateChanged(IGridNodeListener.State reason) {
+        super.onMainNodeStateChanged(reason);
+        com.muuxa.aurelium.compat.ae2lt.AE2LTFrequencyHooks.onMainNodeStateChanged(this, reason);
+    }
+
+    @Override
+    public void saveAdditional(CompoundTag tag, HolderLookup.Provider registries) {
+        super.saveAdditional(tag, registries);
+        com.muuxa.aurelium.compat.ae2lt.AE2LTFrequencyHooks.save(this, tag);
+    }
+
+    @Override
+    public void loadTag(CompoundTag tag, HolderLookup.Provider registries) {
+        super.loadTag(tag, registries);
+        com.muuxa.aurelium.compat.ae2lt.AE2LTFrequencyHooks.load(this, tag);
     }
 
     /**

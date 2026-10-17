@@ -108,22 +108,6 @@ public final class PatternContainerAccess {
     }
 
     /**
-     * Some aggregate interfaces expose a logical merged pattern view as their "container". The
-     * ECO machine interface maps several pattern buses into one table, so a target-output precheck
-     * over that merged view is not a reliable duplicate test for one physical target. Let the
-     * interface's own slot write decide what is accepted.
-     */
-    public static boolean suppressDuplicatePrecheck(InternalInventory inv) {
-        return inv instanceof EcoInterfaceInventory;
-    }
-
-    /** True when this exact target slot's physical backing bus already has the same primary output. */
-    public static boolean hasPrimaryOutputAtSlot(InternalInventory inv, int slot, ItemStack candidate, Level level) {
-        return inv instanceof EcoInterfaceInventory eco
-                && eco.hasPrimaryOutputAtSlot(slot, candidate, level);
-    }
-
-    /**
      * Shared lookup for block entities <b>and</b> cable-mounted parts: interface first, then the
      * cached reflective fallback (covers add-ons that expose the method without implementing the
      * interface).
@@ -231,6 +215,9 @@ public final class PatternContainerAccess {
         private final Method set;
         private final Method refresh;
         private final Field refsField;
+        /** While a bulk session is open the catalog rebuild is deferred to one refresh at close. */
+        private int bulkDepth;
+        private boolean refreshPending;
 
         private EcoInterfaceInventory(Object host, int size, Method get, Method set, Method refresh,
                                       Field refsField) {
@@ -264,9 +251,28 @@ public final class PatternContainerAccess {
             try {
                 set.invoke(host, slot, stack == null ? ItemStack.EMPTY : stack);
                 if (host instanceof BlockEntity be) be.setChanged();
-                if (refresh != null) refresh.invoke(host);
+                if (bulkDepth > 0) {
+                    refreshPending = true;
+                } else if (refresh != null) {
+                    refresh.invoke(host);
+                }
             } catch (Throwable ignored) {
                 // The caller verifies by reading the slot back, so a refused write stays uncounted.
+            }
+        }
+
+        void beginBulk() {
+            bulkDepth++;
+        }
+
+        void endBulk() {
+            if (bulkDepth > 0) bulkDepth--;
+            if (bulkDepth > 0 || !refreshPending) return;
+            refreshPending = false;
+            try {
+                if (refresh != null) refresh.invoke(host);
+            } catch (Throwable ignored) {
+                // best effort: the catalog catches up on the next real change
             }
         }
 
@@ -280,30 +286,6 @@ public final class PatternContainerAccess {
             return 1;
         }
 
-        private boolean hasPrimaryOutputAtSlot(int slot, ItemStack candidate, Level level) {
-            if (refsField == null || candidate == null || candidate.isEmpty() || level == null) return false;
-            AEKey wanted = PatternOutputs.primaryOutput(candidate, level);
-            if (wanted == null) return false;
-            try {
-                Object refsValue = refsField.get(host);
-                if (!(refsValue instanceof List<?> refs) || slot < 0 || slot >= refs.size()) return false;
-                Object ref = refs.get(slot);
-                Object bus = invokeNoArg(ref, "bus");
-                Object localValue = invokeNoArg(ref, "slot");
-                int local = localValue instanceof Integer i ? i : -1;
-                InternalInventory target = invokeInventory(bus, "getPatternSlotInventory");
-                if (target == null) return false;
-                for (int i = 0; i < target.size(); i++) {
-                    if (i == local) continue;
-                    ItemStack stack = target.getStackInSlot(i);
-                    if (stack == null || stack.isEmpty()) continue;
-                    if (wanted.equals(PatternOutputs.primaryOutput(stack, level))) return true;
-                }
-            } catch (Throwable ignored) {
-                return false;
-            }
-            return false;
-        }
     }
 
     /** Data_Energistics Trinity pattern management controller / core / terminal partitions. */
@@ -1333,6 +1315,7 @@ public final class PatternContainerAccess {
          * per write on a 4096-slot pattern assembly, i.e. seconds of freeze for one paste.
          */
         private final ChangeBatch uselessBatch;
+        private final EcoInterfaceInventory ecoBulk;
         private int cursor;
         private boolean closed;
 
@@ -1340,6 +1323,8 @@ public final class PatternContainerAccess {
             this.inv = inv;
             this.quiet = beginQuiet(inv);
             this.uselessBatch = ChangeBatch.open(inv);
+            this.ecoBulk = inv instanceof EcoInterfaceInventory eco ? eco : null;
+            if (ecoBulk != null) ecoBulk.beginBulk();
         }
 
         /** Total slots in the wrapped inventory (the denominator for progress display). */
@@ -1389,6 +1374,7 @@ public final class PatternContainerAccess {
             // the single save) while AE2's re-entrancy flag is still raised, so the refresh that
             // follows does not re-trigger a per-slot notification storm.
             if (uselessBatch != null) uselessBatch.release();
+            if (ecoBulk != null) ecoBulk.endBulk();
             endQuiet(inv, quiet);
         }
     }
@@ -1551,6 +1537,7 @@ public final class PatternContainerAccess {
          * per-slot save into a single one when the scope closes.
          */
         private final ChangeBatch uselessBatch;
+        private final EcoInterfaceInventory ecoBulk;
         private final java.util.function.Predicate<ItemStack> allowlist;
         /**
          * Entries still to place. An {@link java.util.ArrayDeque} rather than a {@code List}:
@@ -1585,6 +1572,8 @@ public final class PatternContainerAccess {
             this.level = level;
             this.quiet = beginQuiet(inv);
             this.uselessBatch = ChangeBatch.open(inv);
+            this.ecoBulk = inv instanceof EcoInterfaceInventory eco ? eco : null;
+            if (ecoBulk != null) ecoBulk.beginBulk();
             this.allowlist = allowlist;
             this.pending = new java.util.ArrayDeque<>(pending);
             this.slots = new int[slots.size()];
@@ -1659,12 +1648,6 @@ public final class PatternContainerAccess {
                 processed++;
                 if (!inv.getStackInSlot(slot).isEmpty()) continue; // taken by someone else
                 ItemStack next = pending.peekFirst();
-                if (hasPrimaryOutputAtSlot(inv, slot, next, level)) {
-                    duplicateRefused++;
-                    pending.addLast(pending.removeFirst());
-                    if (++consecutiveSkips >= pending.size()) break;
-                    continue;
-                }
                 if (allowlist != null && !allowlist.test(next)) {
                     filterRefused++;
                     // Rotate and keep scanning; bail out once every remaining entry was refused in
@@ -1697,6 +1680,7 @@ public final class PatternContainerAccess {
             // the single save) while AE2's re-entrancy flag is still raised, so the refresh that
             // follows does not re-trigger a per-slot notification storm.
             if (uselessBatch != null) uselessBatch.release();
+            if (ecoBulk != null) ecoBulk.endBulk();
             endQuiet(inv, quiet);
         }
 

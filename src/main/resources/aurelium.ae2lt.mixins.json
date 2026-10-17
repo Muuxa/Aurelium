@@ -1,0 +1,14 @@
+{
+  "required": true,
+  "minVersion": "0.8.5",
+  "package": "com.muuxa.aurelium.compat.ae2lt.mixin",
+  "plugin": "com.muuxa.aurelium.compat.ae2lt.AE2LTMixinPlugin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [
+    "TileAdvanceIOPortFrequencyMixin",
+    "NetworkedBlockEntityNodeDelegateMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

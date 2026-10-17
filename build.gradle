@@ -34,6 +34,9 @@ dependencies {
     compileOnly "local:neoecoae:${neoecoae_version}"
     // Optional read-side interop with Data_Energistics' exact accounting.
     compileOnly "local:data_energistics:${data_energistics_version}"
+    // Optional interop with AE2 Lightning Tech's frequency binding API (OI port).
+    // Loaded at runtime only through a mixin gated on the mod being present.
+    compileOnly "local:ae2lt:${ae2lt_version}"
 
     // Note: Mixin/ASM is supplied by ModDevGradle (NeoForge bundles it), so there is no
     // explicit mixin dependency here - Maven Central does not host org.spongepowered:mixin

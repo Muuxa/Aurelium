@@ -463,9 +463,8 @@ public class PatternToolItem extends Item {
                     return placePhase(player, minSlots, deadline);
                 }
                 case 3 -> {
-                    // Anything swapped out in replace mode goes back to the player before the rest
-                    // of the outcome is computed.
-                    dropUnrestorable(player, displaced);
+                    // Anything swapped out in replace mode is written back into this tool by
+                    // prepareWriteBack(), so it can be reused instead of vanishing.
                     prepareWriteBack(player);
                     phase = 4;
                     return PatternToolWorker.Progress.WAITING;
@@ -594,7 +593,11 @@ public class PatternToolItem extends Item {
          */
         private void decidePlacement(ServerPlayer player) {
             java.util.Set<appeng.api.stacks.AEKey> targetOutputs = scan.outputs();
-            boolean precheckDuplicates = !PatternContainerAccess.suppressDuplicatePrecheck(inv);
+            // The virtual target container: starts with everything already in the real container
+            // and grows as candidates are accepted. That makes batch-internal duplicates visible
+            // without ever touching the real container during the decision pass.
+            java.util.Set<appeng.api.stacks.AEKey> plannedOutputs =
+                    new java.util.HashSet<>(targetOutputs);
             boolean replaceMode = PatternToolData.isReplaceMode(held.stack());
             pending.clear();
             duplicateIncoming.clear();
@@ -605,31 +608,30 @@ public class PatternToolItem extends Item {
                     continue;
                 }
                 appeng.api.stacks.AEKey output = PatternOutputs.primaryOutput(candidate, level);
-                // Compare only against the target container's existing contents. Some merged
-                // interfaces (ECO machine interface) cannot provide a trustworthy target-output set,
-                // so duplicate prechecking is disabled for them and the slot write remains final.
-                boolean duplicate = precheckDuplicates && output != null && targetOutputs.contains(output);
-                if (!duplicate) {
-                    pending.add(candidate);
-                    continue;
-                }
-                if (replaceMode && targetOutputs.contains(output)) {
+                boolean duplicate = output != null && plannedOutputs.contains(output);
+                if (duplicate && replaceMode && targetOutputs.contains(output)) {
                     PatternContainerAccess.RemoveResult removed =
                             PatternContainerAccess.removePrimaryOutputSlot(inv, output, level);
                     if (removed != null) {
                         displaced.add(removed.removed());
                         targetOutputs.remove(output);
+                        plannedOutputs.remove(output);
                         pending.add(candidate);
+                        plannedOutputs.add(output);
                         // The slot just vacated is free again. The scan ran before this, so it has
                         // to be added explicitly or the replacement would have nowhere to go.
                         scan.addFreeSlot(removed.slot());
                         continue;
                     }
                 }
+                if (!duplicate) {
+                    pending.add(candidate);
+                    if (output != null) plannedOutputs.add(output);
+                    continue;
+                }
                 duplicateIncoming.add(candidate);
             }
             if (pending.isEmpty()) {
-                dropUnrestorable(player, displaced);
                 if (duplicateCount() == 0 && invalid == 0 && !disallowedIncoming.isEmpty()) {
                     player.displayClientMessage(Component.translatable(
                             "item.aurelium.pattern_tool.rejected_by_container",
@@ -647,7 +649,6 @@ public class PatternToolItem extends Item {
          * container's own filter refusing the patterns, or genuinely no free slot.
          */
         private void reportNothingPlaced(ServerPlayer player) {
-            dropUnrestorable(player, displaced);
             int refused = placeSession != null ? placeSession.filterRefused() : 0;
             int storedTotal = stored == null ? 0 : stored.size();
             if (storedTotal > 0 && duplicateCount() >= storedTotal) {
@@ -669,38 +670,61 @@ public class PatternToolItem extends Item {
 
         /** Cut tool: rebuild the leftover payload from the original tags and compress it off-thread. */
         private void prepareWriteBack(ServerPlayer player) {
-            if (copyOnly) return;
+            // A copy tool normally keeps its payload untouched, but replace mode can still pull
+            // old patterns out of the target. Those must be stored too ("swapped into the tool").
+            if (copyOnly && displaced.isEmpty()) return;
             // `pending` now holds exactly the entries that did NOT land, so the rebuilt payload is
             // "unplaced + duplicates + invalid" — this is what makes a paste consume what it placed.
             java.util.IdentityHashMap<ItemStack, Integer> indexOf = new java.util.IdentityHashMap<>();
             for (int i = 0; i < stored.size(); i++) indexOf.put(stored.get(i), tagIndex.get(i));
             boolean[] keptTag = new boolean[tags.size()];
-            for (ItemStack leftover : pending) {
-                Integer idx = indexOf.get(leftover);
-                if (idx != null) keptTag[idx] = true;
-            }
-            for (ItemStack leftover : duplicateIncoming) {
-                Integer idx = indexOf.get(leftover);
-                if (idx != null) keptTag[idx] = true;
-            }
-            for (ItemStack leftover : disallowedIncoming) {
-                Integer idx = indexOf.get(leftover);
-                if (idx != null) keptTag[idx] = true;
-            }
-            for (int idx : invalidTagIndex) {
-                if (idx >= 0 && idx < keptTag.length) keptTag[idx] = true;
+            if (copyOnly) {
+                java.util.Arrays.fill(keptTag, true); // copy tool: nothing is consumed
+            } else {
+                for (ItemStack leftover : pending) {
+                    Integer idx = indexOf.get(leftover);
+                    if (idx != null) keptTag[idx] = true;
+                }
+                for (ItemStack leftover : duplicateIncoming) {
+                    Integer idx = indexOf.get(leftover);
+                    if (idx != null) keptTag[idx] = true;
+                }
+                for (ItemStack leftover : disallowedIncoming) {
+                    Integer idx = indexOf.get(leftover);
+                    if (idx != null) keptTag[idx] = true;
+                }
+                for (int idx : invalidTagIndex) {
+                    if (idx >= 0 && idx < keptTag.length) keptTag[idx] = true;
+                }
             }
             ListTag remaining = new ListTag();
             for (int i = 0; i < tags.size(); i++) {
                 if (keptTag[i]) remaining.add(tags.get(i));
             }
-            remainingCount = remaining.size();
+            java.util.List<ItemStack> replaced = new ArrayList<>(displaced);
+            replacedReturned = replaced.size();
+            remainingCount = remaining.size() + replaced.size();
             PatternToolWorker.submitBackground(player,
-                    () -> PatternToolData.compressOnly(remaining),
-                    compressed -> pendingCompressed = compressed);
+                    () -> {
+                        ListTag combined = new ListTag();
+                        for (int i = 0; i < remaining.size(); i++) combined.add(remaining.get(i));
+                        var registries = player.registryAccess();
+                        for (ItemStack stack : replaced) {
+                            if (stack == null || stack.isEmpty()) continue;
+                            combined.add(stack.save(registries, new net.minecraft.nbt.CompoundTag()));
+                        }
+                        return combined;
+                    },
+                    combined -> {
+                        if (combined == null) return;
+                        remainingCount = combined.size();
+                        pendingCompressed = PatternToolData.compressOnly(combined);
+                    });
         }
 
         private int remainingCount;
+        /** How many replaced patterns were appended to the tool payload. */
+        private int replacedReturned;
         private byte[] pendingCompressed;
         /** Diagnostics carried from the placement phase into the final report. */
         private int refusedByContainer;
@@ -717,6 +741,7 @@ public class PatternToolItem extends Item {
             if (current == null) {
                 int rolledBack = !copyOnly && placed > 0 && placeSession != null
                         ? placeSession.rollback() : 0;
+                dropUnrestorable(player, displaced);
                 closePlaceSession();
                 resolved = true;
                 if (copyOnly) {
@@ -730,17 +755,27 @@ public class PatternToolItem extends Item {
                 }
                 return;
             }
-            if (!copyOnly && pendingCompressed == null) {
+            if ((!copyOnly || !displaced.isEmpty()) && pendingCompressed == null) {
                 int rolledBack = placeSession == null ? 0 : placeSession.rollback();
+                dropUnrestorable(player, displaced);
                 closePlaceSession();
                 resolved = true;
                 player.displayClientMessage(Component.translatable(
                         "item.aurelium.pattern_tool.paste_rollback_failed", rolledBack), true);
                 return;
             }
-            if (!copyOnly) {
-                PatternToolData.writeCompressed(current.stack(), remainingCount, pendingCompressed);
+            if (!copyOnly || !displaced.isEmpty()) {
+                if (!PatternToolData.writeCompressed(current.stack(), remainingCount, pendingCompressed)) {
+                    int rolledBack = placeSession == null ? 0 : placeSession.rollback();
+                    dropUnrestorable(player, displaced);
+                    closePlaceSession();
+                    resolved = true;
+                    player.displayClientMessage(Component.translatable(
+                            "item.aurelium.pattern_tool.paste_rollback_failed", rolledBack), true);
+                    return;
+                }
             }
+            displaced.clear();
             PatternToolData.setInvalidCount(current.stack(), invalid);
             PatternToolData.clearOperation(current.stack(), operation);
             current.markChanged(player);
@@ -750,28 +785,29 @@ public class PatternToolItem extends Item {
                 reportCopyOutcome(player, current);
                 return;
             }
-            if (remainingCount > 0) {
+            int unplaced = Math.max(0, remainingCount - replacedReturned);
+            if (unplaced > 0) {
                 if (placed == 0 && (refusedByContainer > 0 || !disallowedIncoming.isEmpty())
                         && duplicateCount() + invalid < stored.size()) {
                     int refused = refusedByContainer + disallowedIncoming.size();
-                    player.displayClientMessage(Component.translatable(
-                            "item.aurelium.pattern_tool.rejected_by_container", refused), true);
+                    player.displayClientMessage(withReplaced(Component.translatable(
+                            "item.aurelium.pattern_tool.rejected_by_container", refused)), true);
                     return;
                 }
                 if (duplicateCount() == 0 && invalid == 0 && disallowedIncoming.isEmpty()) {
-                    player.displayClientMessage(Component.translatable(
-                            "item.aurelium.pattern_tool.pasted_partial", placed, remainingCount), true);
+                    player.displayClientMessage(withReplaced(Component.translatable(
+                            "item.aurelium.pattern_tool.pasted_partial", placed, unplaced)), true);
                 } else {
-                    player.displayClientMessage(Component.translatable(
-                            "item.aurelium.pattern_tool.pasted_partial_dup", placed, remainingCount,
-                            duplicateCount() + invalid + disallowedIncoming.size()), true);
+                    player.displayClientMessage(withReplaced(Component.translatable(
+                            "item.aurelium.pattern_tool.pasted_partial_dup", placed, unplaced,
+                            duplicateCount() + invalid + disallowedIncoming.size())), true);
                 }
             } else if (duplicateCount() > 0 || invalid > 0) {
-                player.displayClientMessage(
-                        duplicatesMessage(duplicateCount(), invalid), true);
+                player.displayClientMessage(withReplaced(
+                        duplicatesMessage(duplicateCount(), invalid)), true);
             } else {
-                player.displayClientMessage(Component.translatable(
-                        "item.aurelium.pattern_tool.pasted", placed), true);
+                player.displayClientMessage(withReplaced(Component.translatable(
+                        "item.aurelium.pattern_tool.pasted", placed)), true);
             }
         }
 
@@ -786,27 +822,34 @@ public class PatternToolItem extends Item {
                 if ((refusedByContainer > 0 || !disallowedIncoming.isEmpty())
                         && duplicateCount() + invalid < stored.size()) {
                     int refused = refusedByContainer + disallowedIncoming.size();
-                    player.displayClientMessage(Component.translatable(
-                            "item.aurelium.pattern_tool.rejected_by_container", refused), true);
+                    player.displayClientMessage(withReplaced(Component.translatable(
+                            "item.aurelium.pattern_tool.rejected_by_container", refused)), true);
                 } else {
-                    player.displayClientMessage(
+                    player.displayClientMessage(withReplaced(
                             fullMessage(duplicateCount(), invalid,
                                     scan == null ? 0 : scan.occupied(),
-                                    scan == null ? 0 : scan.freeSlots().size()), true);
+                                    scan == null ? 0 : scan.freeSlots().size())), true);
                 }
                 return;
             }
             if (duplicateCount() > 0 || invalid > 0) {
-                player.displayClientMessage(
-                        duplicatesMessage(duplicateCount(), invalid), true);
+                player.displayClientMessage(withReplaced(
+                        duplicatesMessage(duplicateCount(), invalid)), true);
             } else if (placed < stored.size()) {
-                player.displayClientMessage(Component.translatable(
+                player.displayClientMessage(withReplaced(Component.translatable(
                         "item.aurelium.pattern_tool.pasted_partial_copy", placed,
-                        stored.size() - placed), true);
+                        stored.size() - placed)), true);
             } else {
-                player.displayClientMessage(Component.translatable(
-                        "item.aurelium.pattern_tool.pasted", placed), true);
+                player.displayClientMessage(withReplaced(Component.translatable(
+                        "item.aurelium.pattern_tool.pasted", placed)), true);
             }
+        }
+
+        /** Appends the "replaced patterns were moved into the tool" note to an outcome line. */
+        private Component withReplaced(Component base) {
+            if (replacedReturned <= 0) return base;
+            return base.copy().append(Component.translatable(
+                    "item.aurelium.pattern_tool.replaced_into_tool", replacedReturned));
         }
 
         @Override
@@ -814,6 +857,10 @@ public class PatternToolItem extends Item {
             if (scan != null && !scan.isClosed()) scan.close();
             if (!resolved && placeSession != null && !placeSession.isClosed()) {
                 placeSession.rollback();
+            }
+            if (!resolved && owner != null) {
+                dropUnrestorable(owner, displaced);
+                displaced.clear();
             }
             closePlaceSession();
             if (owner != null) {

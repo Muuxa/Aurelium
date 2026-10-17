@@ -1,0 +1,14 @@
+{
+  "required": true,
+  "minVersion": "0.8.5",
+  "package": "com.muuxa.aurelium.compat.useless.mixin",
+  "plugin": "com.muuxa.aurelium.compat.useless.UselessMixinPlugin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [
+    "ConstructionWandLogicMixin",
+    "ConstructionWandSavedBlockMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
