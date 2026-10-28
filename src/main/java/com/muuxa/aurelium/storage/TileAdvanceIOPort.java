@@ -175,6 +175,11 @@ public class TileAdvanceIOPort extends IOPortBlockEntity {
         com.muuxa.aurelium.compat.ae2lt.AE2LTFrequencyHooks.onReady(this);
     }
 
+    /** Releases the AE2LT virtual connection before the block starts being removed. */
+    public void prepareForRemoval() {
+        com.muuxa.aurelium.compat.ae2lt.AE2LTFrequencyHooks.setRemoved(this);
+    }
+
     @Override
     public void setRemoved() {
         com.muuxa.aurelium.compat.ae2lt.AE2LTFrequencyHooks.setRemoved(this);

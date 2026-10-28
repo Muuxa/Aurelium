@@ -9,6 +9,7 @@ import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.phys.BlockHitResult;
 
 /**
@@ -33,5 +34,16 @@ public class BlockAdvanceIOPort extends IOPortBlock {
             return InteractionResult.sidedSuccess(level.isClientSide);
         }
         return super.useWithoutItem(state, level, pos, player, hit);
+    }
+
+    @Override
+    public boolean onDestroyedByPlayer(BlockState state, Level level, BlockPos pos, Player player,
+                                       boolean willHarvest, FluidState fluid) {
+        // Drop the AE2LT virtual connection before the block entity is removed. Leaving it live
+        // makes the first removal abort during node teardown, leaving the block in place.
+        if (!level.isClientSide && level.getBlockEntity(pos) instanceof TileAdvanceIOPort port) {
+            port.prepareForRemoval();
+        }
+        return super.onDestroyedByPlayer(state, level, pos, player, willHarvest, fluid);
     }
 }
